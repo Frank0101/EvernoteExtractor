@@ -17,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))), "src"))
@@ -43,6 +44,7 @@ PNG2 = resource(b"fake png two", "image/png", "two.png")
 PDF = resource(b"%PDF-1.4 fake", "application/pdf", "Report.pdf")
 XLSX = resource(b"fake sheet", "application/vnd.ms-excel", "data.xlsx")
 RESOURCES = (PNG, PNG2, PDF, XLSX)
+XLSX_BLOCK = "> [!attachment] [data.xlsx](attachments/data.xlsx)"
 
 
 def note_xml(title: str, content: str, created: str | None = "20240115T093000Z",
@@ -73,10 +75,12 @@ def write_enex(path: str, *notes: str) -> str:
     return path
 
 
-def run(*args: str) -> None:
-    """Runs the script's command line, hiding its progress messages."""
-    with contextlib.redirect_stderr(io.StringIO()):
+def run(*args: str) -> str:
+    """Runs the script's command line, returning its progress messages and warnings."""
+    messages = io.StringIO()
+    with contextlib.redirect_stderr(messages):
         enex2md.main(list(args))
+    return messages.getvalue()
 
 
 def read_folder(folder: str) -> dict[str, str]:
@@ -192,13 +196,21 @@ class TestPictures(ExportTest):
         self.check_bodies([
             ("picture", media(PNG), "![](attachments/one.png)"),
             ("PDF shown inline", media(PDF), "![](attachments/Report.pdf)"),
-            ("other file is a link", media(XLSX),
-             "[data.xlsx](attachments/data.xlsx)"),
+            ("other file is a block, as Evernote shows it", media(XLSX),
+             f"{XLSX_BLOCK}"),
+            ("a file and its picture each get a line",
+             f"<div>a</div>{media(XLSX)}{media(PNG)}<div>b</div>",
+             f"a\n\n{XLSX_BLOCK}\n\n![](attachments/one.png)\n&nbsp;\nb"),
+            ("a file in a sentence gets its own block", f"<div>see {media(XLSX)} here</div>",
+             f"see\n\n{XLSX_BLOCK}\n\nhere"),
+            ("a file in a table cell stays a link, since a block would break the table",
+             f"<table><tr><td>a</td><td>{media(XLSX)}</td></tr></table>",
+             "| a | [data.xlsx](attachments/data.xlsx) |\n| --- | --- |"),
         ])
 
     def test_attachment_not_shown_in_the_text_is_added_at_the_end(self):
-        self.assertEqual(self.body("<div>a</div>", resources=(XLSX,)),
-                         "a\n\n[data.xlsx](attachments/data.xlsx)")
+        self.assertEqual(
+            self.body("<div>a</div>", resources=(XLSX,)), f"a\n\n{XLSX_BLOCK}")
 
 
 class TestIndentation(ExportTest):
@@ -489,6 +501,15 @@ class TestNoteLinks(ExportTest):
         self.assertEqual(body_of(notes["Source.md"]),
                          "[target note](Target%20Note.md) and [Missing](evernote:///view/1/s1/zzz/zzz/)")
 
+    def test_link_to_a_duplicated_title_opens_the_first_note(self):
+        notes = self.export(
+            note_xml(
+                "Source", '<div><a href="evernote:///view/1/s1/abc/abc/">Plan</a></div>'),
+            note_xml("Plan", "<div>first</div>"),
+            note_xml("Plan", "<div>second</div>"))
+        self.assertEqual(body_of(notes["Source.md"]), "[Plan](Plan.md)")
+        self.assertEqual(body_of(notes["Plan (2).md"]), "second")
+
     def test_link_into_another_notebook(self):
         write_enex(os.path.join(self.dir, "A.enex"),
                    note_xml("From", '<div><a href="evernote:///view/1/s1/a/a/">To</a></div>'))
@@ -498,6 +519,42 @@ class TestNoteLinks(ExportTest):
             self.dir, "B.enex"), "-o", os.path.join(self.dir, "out"))
         self.assertEqual(body_of(read_folder(os.path.join(self.dir, "out"))[os.path.join("A", "From.md")]),
                          "[To](../B/To.md)")
+
+
+class TestWarnings(ExportTest):
+    """A note that can't be converted is kept as HTML with a warning; a normal one gives none."""
+
+    def convert(self, content: str, resources: tuple[dict, ...] = ()) -> tuple[str, str]:
+        """Returns the converted note's body and the script's messages."""
+        enex = write_enex(os.path.join(self.dir, "Book.enex"),
+                          note_xml("N", content, resources=resources))
+        messages = run(enex)
+        return body_of(read_folder(os.path.join(self.dir, "Book"))["N.md"]), messages
+
+    def test_note_using_every_feature_converts_without_warnings(self):
+        body, messages = self.convert(
+            "<h2>Plan</h2><div>Some <b>bold</b> and "
+            f'<span style="color:{RED};">red</span> text, a <a href="https://example.com">link</a>.</div>'
+            '<ul><li>one</li><li>two</li></ul><ul style="--en-todo:true;"><li style="--en-checked:true;">done</li></ul>'
+            "<table><tr><td>a</td><td>b</td></tr></table>"
+            '<div style="--en-codeblock:true; --en-syntaxLanguage:ruby;"><div>puts 1</div></div>'
+            "<pre>foo bar</pre><hr/>" + media(PNG) + media(XLSX),
+            resources=(PNG, XLSX))
+        self.assertNotIn("warning:", messages)
+        self.assertNotIn("<div", body)
+
+    def test_failed_conversion_keeps_the_note_as_html(self):
+        with mock.patch.object(enex2md.NoteRenderer, "render", side_effect=ValueError("boom")):
+            body, messages = self.convert("<div>kept</div>")
+        self.assertIn("<div>kept</div>", body)
+        self.assertIn(
+            "warning: N: kept as HTML, conversion failed (boom)", messages)
+
+    def test_missing_attachment(self):
+        body, messages = self.convert(f"<div>a</div>{media(PNG)}")
+        self.assertEqual(body, "a")
+        self.assertIn(
+            "warning: N: 1 attachment(s) missing from the export", messages)
 
 
 class TestCommandLine(ExportTest):

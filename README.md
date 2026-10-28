@@ -66,7 +66,8 @@ MyNotebook/
 - **File dates** set to the note's: on macOS both the creation and
   modification dates, elsewhere the modification date.
 - **Attachments** saved once each in `attachments/`. Pictures and PDFs are
-  shown in the note; other files are links.
+  shown in the note; other files are a box with their name, as in Evernote
+  (an Obsidian callout), or a plain link inside a table.
 - **Links between notes** become relative links to the note's file. A link to
   a note that isn't in the export keeps its `evernote://` address.
 - **Formatting** kept: headings, bold, italics, strikethrough, lists, to-dos,

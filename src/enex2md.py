@@ -7,7 +7,8 @@ file's creation and modification times set to the note's (on macOS; other
 systems keep only the modification time). Attachments are saved
 once each, in an attachments/ folder beside the notes, and linked with relative
 paths: pictures and PDFs are shown in the note, as Obsidian can, and other
-files are links; links from one note to another become relative links to its file. The
+files are a box with their link, as Evernote shows them (an Obsidian
+callout); links from one note to another become relative links to its file. The
 output is plain Markdown, so it works as-is in Obsidian, in a Git repository or
 in any Markdown editor.
 
@@ -477,6 +478,7 @@ class NoteRenderer:
         self.missing = 0
         self.code = False
         self.list_depth = 0
+        self.cell_depth = 0
         self.marks: set[str] = set()
         self.color: str | None = None
 
@@ -491,7 +493,7 @@ class NoteRenderer:
             if body:
                 body += f"\n{BLANK_LINE}\n" if IMAGE_LINE_END.search(
                     body) else "\n\n"
-            body += self.embed(attachment)
+            body += resolve(self.embed(attachment))
         body = join_touching_code(self.fill_languages(body))
         return "\n".join(line.rstrip() for line in body.split("\n"))
 
@@ -844,7 +846,11 @@ class NoteRenderer:
         return PARA + "\n".join(lines) + PARA
 
     def cell(self, element: Element) -> str:
-        text = resolve(self.block_children(element)).replace("|", "\\|")
+        self.cell_depth += 1
+        try:
+            text = resolve(self.block_children(element)).replace("|", "\\|")
+        finally:
+            self.cell_depth -= 1
         return re.sub(r"\\?\n+", "<br>", text)
 
     def media(self, element: Element) -> str:
@@ -884,13 +890,18 @@ class NoteRenderer:
         return self.folder.save_attachment(Resource(data, mime, "", hashlib.md5(data).hexdigest()))
 
     def embed(self, attachment: Attachment) -> str:
-        """Shows a picture or a PDF in the note, as Obsidian can; links any other file."""
+        """Shows a picture or a PDF in the note, as Obsidian can; any other file is a block
+        with its link, as Evernote shows it, or a bare link in a table cell."""
         target = local_link(attachment.path)
         if (attachment.mime.startswith("image/") or attachment.mime == "application/pdf"
                 or attachment.name.lower().endswith(".pdf")):
             return f"![]({target})"
         name = MARKDOWN_SPECIAL.sub(r"\\\1", attachment.name)
-        return f"[{name}]({target})"
+        link = f"[{name}]({target})"
+        if self.cell_depth:
+            return link
+        # a callout, which Obsidian draws as a box; other editors show a quote
+        return PARA + f"> [!attachment] {link}" + PARA
 
 
 class Element:

@@ -406,9 +406,11 @@ def read_resource(element: ET.Element) -> Resource | None:
 
 def parse_time(value: str | None) -> datetime | None:
     """Reads Evernote's UTC timestamps, such as 20240115T093000Z."""
+    if not value:
+        return None
     try:
         return datetime.strptime(value.strip(), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-    except (AttributeError, ValueError):
+    except ValueError:
         return None
 
 
@@ -645,7 +647,10 @@ class NoteRenderer:
         """Renders a block's content, dropping a <br> that ends it, as a browser does."""
         kids = element.children
         end = len(kids)
-        while end and isinstance(kids[end - 1], str) and not kids[end - 1].strip():
+        while end:
+            kid = kids[end - 1]
+            if not isinstance(kid, str) or kid.strip():
+                break
             end -= 1
         last = kids[end - 1] if end else None
         if isinstance(last, Element) and last.tag == "br" and any(
@@ -799,11 +804,13 @@ class NoteRenderer:
                         widths.append(0)
                     continue
                 is_item = isinstance(child, Element) and child.tag == "li"
-                if is_item:
-                    child_style = (child.attrs.get("style")
+                child_style = ""
+                if isinstance(child, Element) and is_item:
+                    item = child
+                    child_style = (item.attrs.get("style")
                                    or "").replace(" ", "").lower()
                     body = resolve(self.with_color(
-                        child, child_style, lambda own: self.block_children(child)))
+                        item, child_style, lambda own: self.block_children(item)))
                 else:
                     body = resolve(self.node(child))
                 bullet = f"{number}." if ordered else "-"

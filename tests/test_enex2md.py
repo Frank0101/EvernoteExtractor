@@ -470,7 +470,20 @@ class TestFormatting(ExportTest):
              "*(encrypted content not exported)*"),
             ("page parts that aren't text are dropped",
              "<div>a<script>alert(1)</script><style>p { }</style></div>", "a"),
+            ("touching highlights join into one",
+             '<div><span style="--en-highlight:yellow;">Everywhere else</span>'
+             '<span style="--en-highlight:yellow;">:</span></div>', "==Everywhere else:=="),
+            ("touching bold and strikethrough join into one",
+             "<div><b>a</b><b>b</b> <s>c</s><s>d</s></div>", "**ab** ~~cd~~"),
+            ("highlights with a space between them stay apart",
+             '<div><span style="--en-highlight:yellow;">a</span> <span style="--en-highlight:yellow;">b</span></div>',
+             "==a== ==b=="),
         ])
+
+    def test_touching_marks_in_code_stay(self):
+        for text in ["```\na====b\n```", "x `a====b` y", "```\n~~~~\n```"]:
+            with self.subTest(text):
+                self.assertEqual(enex2md.join_touching_marks(text), text)
 
     def test_links(self):
         self.check_bodies([

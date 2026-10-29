@@ -118,6 +118,9 @@ BLANK_LINE = "&nbsp;"
 MARKDOWN_SPECIAL = re.compile(r"([\\`*\[\]<]|(?<!\w)_|_(?!\w))")
 CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 TOUCHING_CODE = re.compile(r"(?<!`)`[^`\n]+`(?:`[^`\n]+`)+(?!`)")
+TOUCHING_MARKS = re.compile(r"(?<=[^\s=*~])(?:====|\*\*\*\*|~~~~)(?=[^\s=*~])")
+CODE_SPAN = re.compile(
+    r"^(`{3,})[^\n]*\n.*?^\1[ \t]*$|(`+)[^\n]*?(?<!`)\2(?!`)", re.M | re.S)
 CODE_INDENT = "    "
 
 # HTML
@@ -514,7 +517,8 @@ class NoteRenderer:
                 body += f"\n{BLANK_LINE}\n" if IMAGE_LINE_END.search(
                     body) else "\n\n"
             body += resolve(self.embed(attachment))
-        body = join_touching_code(self.fill_languages(body))
+        body = join_touching_marks(
+            join_touching_code(self.fill_languages(body)))
         return "\n".join(line.rstrip() for line in body.split("\n"))
 
     # Blocks and their children
@@ -1123,6 +1127,17 @@ def join_touching_code(text: str) -> str:
     """Joins pieces of inline code that touch, as pieces from different nesting levels can:
     `a``b` would read as one broken piece."""
     return TOUCHING_CODE.sub(lambda match: "`" + match.group(0)[1:-1].replace("``", "") + "`", text)
+
+
+def join_touching_marks(text: str) -> str:
+    """Joins formatted pieces that touch, such as two highlighted spans side by side:
+    ==a====b== would read as broken marks. Code is left as typed."""
+    parts, last = [], 0
+    for match in CODE_SPAN.finditer(text):
+        parts += [TOUCHING_MARKS.sub("",
+                                     text[last:match.start()]), match.group(0)]
+        last = match.end()
+    return "".join(parts) + TOUCHING_MARKS.sub("", text[last:])
 
 
 def link_target(url: str) -> str:

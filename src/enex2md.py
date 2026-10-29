@@ -119,10 +119,14 @@ BLANK_LINE = "&nbsp;"
 MARKDOWN_SPECIAL = re.compile(r"([\\`*\[\]<]|(?<!\w)_|_(?!\w))")
 CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 TOUCHING_CODE = re.compile(r"(?<!`)`[^`\n]+`(?:`[^`\n]+`)+(?!`)")
-TOUCHING_MARKS = re.compile(r"(?<=[^\s=*~])(?:====|\*\*\*\*|~~~~)(?=[^\s=*~])")
-CODE_SPAN = re.compile(
-    r"^(`{3,})[^\n]*\n.*?^\1[ \t]*$|(`+)[^\n]*?(?<!`)\2(?!`)", re.M | re.S)
 CODE_INDENT = "    "
+# A formatting mark, such as ** for bold, is held as a token until the note is
+# complete, so that pieces with the same mark that touch can be joined: *a**b*
+# would read as bold. An opening token is the mark between MARK_OPEN, a closing
+# one between MARK_CLOSE.
+MARK_OPEN, MARK_CLOSE = "\x0e", "\x0f"
+MARK_TOKEN = re.compile(r"([\x0e\x0f])([^\x0e\x0f]+)\1")
+TOUCHING_MARKS = re.compile(r"\x0f([^\x0e\x0f]+)\x0f\x0e\1\x0e")
 
 # HTML
 VOID_TAGS = {"br", "hr", "img", "en-media", "en-todo", "input", "meta", "link",
@@ -518,8 +522,7 @@ class NoteRenderer:
                 body += f"\n{BLANK_LINE}\n" if IMAGE_LINE_END.search(
                     body) else "\n\n"
             body += resolve(self.embed(attachment))
-        body = join_touching_marks(
-            join_touching_code(self.fill_languages(body)))
+        body = join_touching_code(write_marks(self.fill_languages(body)))
         return "\n".join(line.rstrip() for line in body.split("\n"))
 
     # Blocks and their children
@@ -702,9 +705,10 @@ class NoteRenderer:
         lead, core, trail = split_space(inner)
         if not marks or not core or any(marker in inner for marker in MARKERS):
             return inner
-        closing = "".join("</" + mark[1:] if mark.startswith("<") else mark
+        opening = "".join(MARK_OPEN + mark + MARK_OPEN for mark in marks)
+        closing = "".join(MARK_CLOSE + mark + MARK_CLOSE
                           for mark in reversed(marks))
-        return f"{lead}{''.join(marks)}{core}{closing}{trail}"
+        return f"{lead}{opening}{core}{closing}{trail}"
 
     def link(self, element: Element) -> str:
         href = (element.attrs.get("href") or "").strip()
@@ -716,7 +720,8 @@ class NoteRenderer:
             return label
         if href.lower().startswith("evernote:"):
             title = re.sub(r"\s+", " ", raw_text(element)).strip()
-            return lead + self.add_note_link(core, title, href) + trail
+            # the link is written once every note is, so its label's marks are now
+            return lead + self.add_note_link(write_marks(core), title, href) + trail
         return f"{lead}[{core}]({link_target(href)}){trail}"
 
     def inline_code(self, element: Element) -> str:
@@ -1132,15 +1137,18 @@ def join_touching_code(text: str) -> str:
     return TOUCHING_CODE.sub(lambda match: "`" + match.group(0)[1:-1].replace("``", "") + "`", text)
 
 
-def join_touching_marks(text: str) -> str:
-    """Joins formatted pieces that touch, such as two highlighted spans side by side:
-    ==a====b== would read as broken marks. Code is left as typed."""
-    parts, last = [], 0
-    for match in CODE_SPAN.finditer(text):
-        parts += [TOUCHING_MARKS.sub("",
-                                     text[last:match.start()]), match.group(0)]
-        last = match.end()
-    return "".join(parts) + TOUCHING_MARKS.sub("", text[last:])
+def write_marks(text: str) -> str:
+    """Writes the formatting marks' tokens as Markdown, first joining pieces with the
+    same mark that touch, such as two highlighted spans side by side."""
+    joined = 1
+    while joined:  # once the innermost marks join, the ones around them touch
+        text, joined = TOUCHING_MARKS.subn("", text)
+    return MARK_TOKEN.sub(lambda match: closing_mark(match.group(2))
+                          if match.group(1) == MARK_CLOSE else match.group(2), text)
+
+
+def closing_mark(mark: str) -> str:
+    return "</" + mark[1:] if mark.startswith("<") else mark
 
 
 def link_target(url: str) -> str:

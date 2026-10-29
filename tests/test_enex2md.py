@@ -356,6 +356,14 @@ class TestNoteLinks(ExportTest):
         self.assertEqual(body_of(notes["Source.md"]),
                          "[target note](Target%20Note.md) and [Missing](evernote:///view/1/s1/zzz/zzz/)")
 
+    def test_formatted_link_label(self):
+        notes = self.export(
+            note_xml(
+                "Source", '<div><a href="evernote:///view/1/s1/abc/abc/"><b>Target</b></a></div>'),
+            note_xml("Target", "<div>x</div>"))
+        self.assertEqual(
+            body_of(notes["Source.md"]), "[**Target**](Target.md)")
+
     def test_link_to_a_duplicated_title_opens_the_first_note(self):
         notes = self.export(
             note_xml(
@@ -475,15 +483,19 @@ class TestFormatting(ExportTest):
              '<span style="--en-highlight:yellow;">:</span></div>', "==Everywhere else:=="),
             ("touching bold and strikethrough join into one",
              "<div><b>a</b><b>b</b> <s>c</s><s>d</s></div>", "**ab** ~~cd~~"),
+            ("touching italics join into one, rather than reading as bold",
+             "<div><i>a</i><i>b</i></div>", "*ab*"),
+            ("an italic sentence split around a highlight",
+             '<div><i>a </i><i><span style="--en-highlight:yellow;">b</span></i><i>. c</i></div>',
+             "*a* *==b==. c*"),
+            ("touching underlines join into one",
+             "<div><u>a</u><u>b</u></div>", "<u>ab</u>"),
             ("highlights with a space between them stay apart",
              '<div><span style="--en-highlight:yellow;">a</span> <span style="--en-highlight:yellow;">b</span></div>',
              "==a== ==b=="),
+            ("marks typed in code stay", "<div>x <code>a**b</code></div><pre>a====b\n~~~~</pre>",
+             "x `a**b`\n\n```\na====b\n~~~~\n```"),
         ])
-
-    def test_touching_marks_in_code_stay(self):
-        for text in ["```\na====b\n```", "x `a====b` y", "```\n~~~~\n```"]:
-            with self.subTest(text):
-                self.assertEqual(enex2md.join_touching_marks(text), text)
 
     def test_links(self):
         self.check_bodies([

@@ -67,8 +67,8 @@ from __future__ import annotations
 
 import argparse
 import base64
-import binascii
 import collections
+import contextlib
 import hashlib
 import json
 import mimetypes
@@ -82,8 +82,13 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import quote, unquote_to_bytes
 
+# Output files
 ATTACHMENTS_DIR = "attachments"
 MAX_NAME_LENGTH = 100
+UNSAFE_NAME = re.compile(r'[\\/:*?"<>|#^\[\]\x00-\x1f]')
+TAG_SPECIAL = re.compile(r"[^\w/]*[^\w/-][^\w/]*|-{2,}")
+URL_SPECIAL = re.compile(r"[\s()<>]")
+PATH_SPECIAL = re.compile(r"[\s()<>%]")
 
 # Placeholders a rendered block holds until its content is complete; resolve()
 # turns each run of them into line breaks, paragraph breaks and blank lines:
@@ -92,25 +97,30 @@ MAX_NAME_LENGTH = 100
 LINE, PARA, BREAK, INDENT_START, INDENT_END = "\x01", "\x02", "\x03", "\x04", "\x05"
 MARKERS = (LINE, PARA, BREAK, INDENT_START, INDENT_END)
 MARKER_RUN = re.compile(r"[ \t]*[\x01-\x05](?:[ \t]*[\x01-\x05])*[ \t]*")
-CODE_MARKER_RUN = re.compile(r"[\x01-\x05]+")
-INDENT_STYLE = re.compile(r"(?:padding|margin)-left:[1-9]")
-CODE_INDENT = "    "
+BARE_MARKER_RUN = re.compile(r"([\x01-\x05]+)")
 # Stands for a code block's language until every block of the note is known
 LANGUAGE_SLOT = re.compile(r"\x07(\d+)\x07")
-# Stands for a link to another note until every note's file is known.
+# Stands for a link to another note until every note's file is known
 NOTE_LINK = re.compile(r"\x06(\d+)\x06")
+
+# Markdown
 # A line that starts a block of its own; a hard line break before it, or at
 # the end of a block, would show as a literal backslash.
 BLOCK_START = re.compile(r"(?:[-*+] |\d+[.)] |#|>|\||```|~~~|---)")
 LIST_ITEM = re.compile(r"[ \t]*(?:[-*+]|\d+[.)]) ")
+LIST_PREFIX = re.compile(r"(?:[-*+]|\d+\.) (?:\[[ x]\] )?")
 IMAGE_LINE_END = re.compile(r"!\[[^\]]*\]\([^()\s]*\)(?:</span>)*$")
 ADJACENT_IMAGES = re.compile(r"(!\[[^\]]*\]\([^()\s]*\))[ \t]*(?=!\[)")
 DIVIDER = "---"
 DIVIDER_START = re.compile(r"---(?:[\x01-\x05]|$)")
 HARD_BREAK = "\n"
 BLANK_LINE = "&nbsp;"
+MARKDOWN_SPECIAL = re.compile(r"([\\`*\[\]<]|(?<!\w)_|_(?!\w))")
 CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+TOUCHING_CODE = re.compile(r"(?<!`)`[^`\n]+`(?:`[^`\n]+`)+(?!`)")
+CODE_INDENT = "    "
 
+# HTML
 VOID_TAGS = {"br", "hr", "img", "en-media", "en-todo", "input", "meta", "link",
              "col", "area", "wbr", "source"}
 SKIPPED_TAGS = {"head", "title", "style", "script", "noscript", "svg", "iframe",
@@ -121,19 +131,25 @@ BLOCK_TAGS = {"div", "en-note", "html", "body", "section", "article", "header",
               "summary", "li", "tr", "td", "th", "thead", "tbody", "tfoot",
               "caption"}
 HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-
-UNSAFE_NAME = re.compile(r'[\\/:*?"<>|#^\[\]\x00-\x1f]')
-MARKDOWN_SPECIAL = re.compile(r"([\\`*\[\]<]|(?<!\w)_|_(?!\w))")
+CODE_TAGS = {"code", "kbd", "samp", "tt"}
+INDENT_STYLE = re.compile(r"(?:padding|margin)-left:[1-9]")
 MONOSPACE_FONT = re.compile(r"consolas|courier|monaco|menlo|monospace|lucida console|"
                             r"source code|fira code|sf mono|andale mono")
-CODE_TAGS = {"code", "kbd", "samp", "tt"}
-TOUCHING_CODE = re.compile(r"(?<!`)`[^`\n]+`(?:`[^`\n]+`)+(?!`)")
+
+# Text colours
+COLOR_STYLE = re.compile(r"(?<![-\w])color:([^;]+)")
+SAFE_COLOR = re.compile(r"[#\w(),.%]+")
+RGB_COLOR = re.compile(r"rgba?\((\d+),(\d+),(\d+)(?:,[\d.]+)?\)")
+NEUTRAL_COLORS = {"black", "white", "gray", "grey", "inherit", "initial", "unset",
+                  "currentcolor", "transparent"}
+
+# Code languages
 # Evernote's names for code block languages that Obsidian names differently
 EVERNOTE_LANGUAGES = {"cs": "csharp",
                       "js": "javascript", "ts": "typescript", "sh": "bash"}
 # Patterns that point to one language, each worth a point, or two when given
-# as (pattern, 2) because only that language has it; guess_language names one
-# only with two points
+# as (pattern, 2) because only that language has it; a language is named only
+# with two points
 STRONG = 2
 SHELL_COMMAND = (r"^\s*(\$\s+)?([A-Z_][A-Z0-9_]*=\S*\s+)*"  # an environment variable may come first
                  r"(sudo|npm|npx|yarn|pnpm|dotnet|git|docker|kubectl|brew|pip3?|curl|"
@@ -181,25 +197,19 @@ TITLE_LANGUAGES = {language: re.compile(pattern, re.I) for language, pattern in 
     "python": r"\bpython\b",
     "powershell": r"powershell",
 }.items()}
-URL_SPECIAL = re.compile(r"[\s()<>]")
-PATH_SPECIAL = re.compile(r"[\s()<>%]")
-TAG_SPECIAL = re.compile(r"[^\w/]*[^\w/-][^\w/]*|-{2,}")
-COLOR_STYLE = re.compile(r"(?<![-\w])color:([^;]+)")
-SAFE_COLOR = re.compile(r"[#\w(),.%]+")
-RGB_COLOR = re.compile(r"rgba?\((\d+),(\d+),(\d+)(?:,[\d.]+)?\)")
-NEUTRAL_COLORS = {"black", "white", "gray", "grey", "inherit", "initial", "unset",
-                  "currentcolor", "transparent"}
-SEGMENTS = re.compile(r"([\x01-\x05]+)")
-LIST_PREFIX = re.compile(r"(?:[-*+]|\d+\.) (?:\[[ x]\] )?")
 
 
 @dataclass
 class Resource:
-    """A file attached to a note, as the export holds it."""
+    """A file attached to a note, as the export holds it; its hash is the one
+    Evernote gives it, which the note's <en-media> tags refer to."""
     data: bytes
     mime: str
-    file_name: str
-    hash: str
+    file_name: str = ""
+    hash: str = field(init=False)
+
+    def __post_init__(self):
+        self.hash = hashlib.md5(self.data).hexdigest()
 
 
 @dataclass
@@ -251,9 +261,6 @@ class Exporter:
             for stamp in stamps:
                 os.utime(path, (stamp, stamp))
 
-    def attachment_count(self) -> int:
-        return sum(len(folder.attachment_names) for folder in self.folders.values())
-
     def export_file(self, path: str, folder: NoteFolder) -> None:
         print(f"Reading {path}", file=sys.stderr)
         try:
@@ -270,8 +277,8 @@ class Exporter:
     def export_note(self, note: Note, folder: NoteFolder) -> None:
         path = folder.note_path(note.title)
         self.notes_by_title.setdefault(note.title.casefold(), path)
-        attachments = {res.hash: folder.save_attachment(
-            res) for res in note.resources}
+        attachments = {res.hash: folder.save_attachment(res)
+                       for res in note.resources}
         renderer = NoteRenderer(attachments, folder,
                                 self.add_note_link, note.title)
         try:
@@ -301,6 +308,8 @@ class Exporter:
         return f"\x06{len(self.note_links) - 1}\x06"
 
     def link_notes(self) -> None:
+        """Turns each link placeholder into a link to the note with its title,
+        once every note's file is known."""
         for path in self.files_with_links:
             with open(path, encoding="utf-8") as file:
                 text = file.read()
@@ -316,6 +325,9 @@ class Exporter:
 
             with open(path, "w", encoding="utf-8", newline="\n") as file:
                 file.write(NOTE_LINK.sub(replace, text))
+
+    def attachment_count(self) -> int:
+        return sum(len(folder.attachments) for folder in self.folders.values())
 
 
 class NoteFolder:
@@ -367,11 +379,8 @@ def unique_name(stem: str, ext: str, taken: set[str]) -> str:
 
 
 def read_note(element: ET.Element) -> Note:
-    attributes = element.find("note-attributes")
-
     def attribute(name: str) -> str | None:
-        value = attributes.findtext(name) if attributes is not None else None
-        return value.strip() if value and value.strip() else None
+        return (element.findtext(f"note-attributes/{name}") or "").strip() or None
 
     latitude, longitude = attribute("latitude"), attribute("longitude")
     return Note(
@@ -392,26 +401,22 @@ def read_note(element: ET.Element) -> Note:
 def read_resource(element: ET.Element) -> Resource | None:
     try:
         data = base64.b64decode(element.findtext("data") or "")
-    except (binascii.Error, ValueError):
+    except ValueError:
         return None
     if not data:
         return None
-    attributes = element.find("resource-attributes")
-    file_name = attributes.findtext(
-        "file-name") if attributes is not None else None
-    mime = (element.findtext("mime") or "").strip(
-    ) or "application/octet-stream"
-    return Resource(data, mime, (file_name or "").strip(), hashlib.md5(data).hexdigest())
+    mime = (element.findtext("mime") or "").strip()
+    file_name = element.findtext("resource-attributes/file-name") or ""
+    return Resource(data, mime or "application/octet-stream", file_name.strip())
 
 
 def parse_time(value: str | None) -> datetime | None:
     """Reads Evernote's UTC timestamps, such as 20240115T093000Z."""
-    if not value:
-        return None
     try:
-        return datetime.strptime(value.strip(), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        stamp = datetime.strptime((value or "").strip(), "%Y%m%dT%H%M%SZ")
     except ValueError:
         return None
+    return stamp.replace(tzinfo=timezone.utc)
 
 
 def front_matter(note: Note) -> str:
@@ -437,32 +442,45 @@ def yaml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)  # a JSON string is valid YAML
 
 
-def text_color(element: Element, style: str) -> str | None:
-    """Returns the text colour an element sets, unless it's a default one (black, grey)."""
-    match = COLOR_STYLE.search(style)
-    if match:
-        value = match.group(1)
-    elif element.tag == "font":
-        value = (element.attrs.get("color") or "").lower().replace(" ", "")
-    else:
-        return None
-    value = value.replace("!important", "")
-    if not SAFE_COLOR.fullmatch(value) or value in NEUTRAL_COLORS:
-        return None
-    rgb = RGB_COLOR.fullmatch(value)
-    if rgb:
-        channels = rgb.groups()
-    elif re.fullmatch(r"#[0-9a-f]{6}", value):
-        channels = (value[1:3], value[3:5], value[5:7])
-    elif re.fullmatch(r"#[0-9a-f]{3}", value):
-        channels = tuple(value[1:])
-    else:
-        channels = ("named",)
-    return None if len(set(channels)) == 1 and channels != ("named",) else value
-
-
 def obsidian_tag(tag: str) -> str:
     return TAG_SPECIAL.sub("-", tag.strip().lstrip("#")).strip("-")
+
+
+class Element:
+    """An HTML element of a note's body."""
+    __slots__ = ("tag", "attrs", "children")
+
+    def __init__(self, tag: str, attrs: list[tuple[str, str | None]]):
+        self.tag = tag
+        self.attrs = dict(attrs)
+        self.children: list[Element | str] = []
+
+
+class TreeBuilder(HTMLParser):
+    """Builds an Element tree from HTML that may not be well formed."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.root = Element("root", [])
+        self.stack = [self.root]
+
+    def handle_starttag(self, tag, attrs):
+        element = Element(tag, attrs)
+        self.stack[-1].children.append(element)
+        if tag not in VOID_TAGS:
+            self.stack.append(element)
+
+    def handle_startendtag(self, tag, attrs):
+        self.stack[-1].children.append(Element(tag, attrs))
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.stack) - 1, 0, -1):
+            if self.stack[index].tag == tag:
+                del self.stack[index:]
+                return
+
+    def handle_data(self, data):
+        self.stack[-1].children.append(data)
 
 
 class NoteRenderer:
@@ -471,11 +489,11 @@ class NoteRenderer:
     def __init__(self, attachments: dict[str, Attachment], folder: NoteFolder, add_note_link,
                  title: str = ""):
         self.attachments = attachments
+        self.folder = folder
+        self.add_note_link = add_note_link
         self.hints = title_languages(title)
         # per code block: the language Evernote recorded, or the scores of its guess
         self.languages: list[str | dict[str, int]] = []
-        self.folder = folder
-        self.add_note_link = add_note_link
         self.used: set[str] = set()
         self.missing = 0
         self.code = False
@@ -499,113 +517,38 @@ class NoteRenderer:
         body = join_touching_code(self.fill_languages(body))
         return "\n".join(line.rstrip() for line in body.split("\n"))
 
-    def fence(self, text: str, language: str | None) -> str:
-        """Fences a code block; with no language recorded (None), its language is decided later."""
-        # code inside an indent starts at the margin, keeping its own indentation
-        text = textwrap.dedent(text.strip("\n").rstrip())
-        if not text.strip():
-            return ""
-        if language is None:
-            self.languages.append(language_scores(text, self.hints))
-            language = f"\x07{len(self.languages) - 1}\x07"
-        else:
-            self.languages.append(language)
-        return fenced(text, language)
+    # Blocks and their children
 
-    def fill_languages(self, body: str) -> str:
-        """Names each guessed block's language, taking the note's usual language when the
-        block's own code is too short to tell but fits it."""
-        named = [entry if isinstance(entry, str) else confident_language(entry)
-                 for entry in self.languages]
-        usual = collections.Counter(
-            language for language in named if language).most_common(1)
+    def block_children(self, element: Element) -> str:
+        """Renders a block's content, dropping a <br> that ends it, as a browser does."""
+        kids = element.children
+        end = len(kids)
+        while end:
+            kid = kids[end - 1]
+            if not isinstance(kid, str) or kid.strip():
+                break
+            end -= 1
+        last = kids[end - 1] if end else None
+        if isinstance(last, Element) and last.tag == "br" and any(
+                not isinstance(kid, str) or kid.strip() for kid in kids[:end - 1]):
+            kids = kids[:end - 1]
+        return self.colored(self.blocks(kids))
 
-        def language(match: re.Match) -> str:
-            index = int(match.group(1))
-            scores = self.languages[index]
-            if named[index] or not usual or isinstance(scores, str):
-                return named[index]
-            best = usual[0][0]
-            # the usual language may be one Evernote recorded that isn't guessed, such as ruby
-            score = scores.get(best, 0)
-            return best if score >= 1 and score == max(scores.values()) else ""
-
-        return LANGUAGE_SLOT.sub(language, body)
-
-    def node(self, node: Element | str) -> str:
-        if isinstance(node, str):
-            return self.text(node)
-        tag = node.tag
-        style = (node.attrs.get("style") or "").lower().replace(" ", "")
-        if tag in SKIPPED_TAGS:
-            return ""
-        if tag == "br":
-            return BREAK
-        if self.code:
-            inner = self.children(node)
-            if is_indent(node) or (tag in BLOCK_TAGS and INDENT_STYLE.search(style)):
-                # old notes indented code with Evernote's indent, not spaces
-                inner = CODE_MARKER_RUN.sub(code_newlines, inner).strip("\n")
-                inner = "\n".join(CODE_INDENT + line if line.strip() else line
-                                  for line in inner.split("\n"))
-            return LINE + inner + LINE if tag in BLOCK_TAGS or tag in ("p", "blockquote") else inner
-        return self.with_color(node, style, lambda own: self.element(node, tag, style, own))
-
-    def with_color(self, element: Element, style: str, render) -> str:
-        """Renders an element with its text colour as the current one, if it sets one."""
-        color = text_color(element, style)
-        if not color or color == self.color:
-            return render(False)
-        outer, self.color = self.color, color
-        try:
-            return render(True)
-        finally:
-            self.color = outer
-
-    def element(self, node: Element, tag: str, style: str, own_color: bool) -> str:
-        if tag == "en-media":
-            return self.media(node)
-        if tag == "en-todo":
-            box = "[x] " if node.attrs.get("checked") == "true" else "[ ] "
-            return box if self.list_depth else "- " + box
-        if tag == "en-crypt":
-            return "*(encrypted content not exported)*"
-        if tag == "img":
-            return self.image(node)
-        if tag == "pre" or "-en-codeblock:true" in style:
-            return self.code_block(node, tag == "pre", recorded_language(style))
-        if tag in HEADING_TAGS:
-            return self.heading(node, int(tag[1]))
-        if tag in ("ul", "ol"):
-            return self.list(node, tag == "ol", style)
-        if tag == "table":
-            return self.table(node)
-        if tag == "blockquote" and not is_indent(node):
-            return self.blockquote(node)
-        if tag == "p":
-            return PARA + self.block_children(node) + PARA
-        if tag in BLOCK_TAGS or tag == "blockquote":
-            if INDENT_STYLE.search(style) or tag == "blockquote":
-                return INDENT_START + LINE + self.block_children(node) + LINE + INDENT_END
-            return LINE + self.block_children(node) + LINE
-        if tag == "hr":
-            return PARA + DIVIDER + PARA
-        if tag == "a":
-            inline = self.link(node)
-        elif tag in CODE_TAGS or is_monospace(node):
-            inline = self.inline_code(node)
-        else:
-            marks = [mark for applies, mark in (
-                (tag in ("b", "strong") or re.search(
-                    r"font-weight:(bold|[6-9]00)", style), "**"),
-                (tag in ("i", "em", "cite") or "font-style:italic" in style, "*"),
-                (tag in ("s", "strike", "del") or "line-through" in style, "~~"),
-                ("--en-highlight:" in style or "-evernote-highlight:true" in style, "=="),
-                (tag in ("u", "ins") or "underline" in style, "<u>"),
-            ) if applies]
-            inline = self.wrap(node, marks)
-        # a block colours its own lines in block_children; an inline element here
-        return self.colored(inline) if own_color else inline
+    def blocks(self, kids: list[Element | str]) -> str:
+        """Renders a block's children, turning each run of monospaced lines into one code block."""
+        parts: list[str] = []
+        run: list[Element] = []
+        for kid in self.merge_monospace(kids):
+            if run and isinstance(kid, str) and not kid.strip():
+                continue  # the whitespace between code lines
+            if not self.code and isinstance(kid, Element) and is_code_line(kid):
+                run.append(kid)
+                continue
+            parts.append(self.code_lines(run))
+            run = []
+            parts.append(self.node(kid))
+        parts.append(self.code_lines(run))
+        return "".join(parts)
 
     def children(self, element: Element) -> str:
         return "".join(map(self.node, self.merge_monospace(element.children)))
@@ -643,66 +586,96 @@ class NoteRenderer:
         flush()
         return merged
 
-    def block_children(self, element: Element) -> str:
-        """Renders a block's content, dropping a <br> that ends it, as a browser does."""
-        kids = element.children
-        end = len(kids)
-        while end:
-            kid = kids[end - 1]
-            if not isinstance(kid, str) or kid.strip():
-                break
-            end -= 1
-        last = kids[end - 1] if end else None
-        if isinstance(last, Element) and last.tag == "br" and any(
-                not isinstance(kid, str) or kid.strip() for kid in kids[:end - 1]):
-            kids = kids[:end - 1]
-        return self.colored(self.blocks(kids))
+    def node(self, node: Element | str) -> str:
+        if isinstance(node, str):
+            return self.text(node)
+        tag, style = node.tag, style_of(node)
+        if tag in SKIPPED_TAGS:
+            return ""
+        if tag == "br":
+            return BREAK
+        if self.code:
+            inner = self.children(node)
+            if is_indent(node) or (tag in BLOCK_TAGS and INDENT_STYLE.search(style)):
+                # old notes indented code with Evernote's indent, not spaces
+                inner = BARE_MARKER_RUN.sub(code_newlines, inner).strip("\n")
+                inner = "\n".join(CODE_INDENT + line if line.strip() else line
+                                  for line in inner.split("\n"))
+            return LINE + inner + LINE if tag in BLOCK_TAGS or tag in ("p", "blockquote") else inner
+        return self.with_color(node, style, lambda own: self.element(node, tag, style, own))
 
-    def blocks(self, kids: list[Element | str]) -> str:
-        """Renders a block's children, turning each run of monospaced lines into one code block."""
-        parts: list[str] = []
-        run: list[Element] = []
-        for kid in self.merge_monospace(kids):
-            if run and isinstance(kid, str) and not kid.strip():
-                continue  # the whitespace between code lines
-            if not self.code and isinstance(kid, Element) and is_code_line(kid):
-                run.append(kid)
-                continue
-            parts.append(self.code_lines(run))
-            run = []
-            parts.append(self.node(kid))
-        parts.append(self.code_lines(run))
-        return "".join(parts)
-
-    def code_lines(self, lines: list[Element]) -> str:
-        """Renders monospaced lines pasted from an editor as one code block."""
-        if not any(code_text(line) for line in lines):
-            # empty lines alone are just blank lines
-            return "".join(map(self.node, lines))
-        # an Evernote code block among the lines keeps the language it recorded
-        styles = [(line.attrs.get("style") or "").lower().replace(" ", "")
-                  for line in lines]
-        recorded = [recorded_language(
-            style) for style in styles if "-en-codeblock:true" in style]
-        language = next(
-            (value for value in recorded if value is not None), None)
-        self.code = True
+    def with_color(self, element: Element, style: str, render) -> str:
+        """Renders an element with its text colour as the current one, if it sets one."""
+        color = text_color(element, style)
+        if not color or color == self.color:
+            return render(False)
+        outer, self.color = self.color, color
         try:
-            text = CODE_MARKER_RUN.sub(
-                code_newlines, LINE.join(map(self.node, lines)))
+            return render(True)
         finally:
-            self.code = False
-        return self.fence(text, language)
+            self.color = outer
+
+    def element(self, node: Element, tag: str, style: str, own_color: bool) -> str:
+        if tag == "en-media":
+            return self.media(node)
+        if tag == "en-todo":
+            box = "[x] " if node.attrs.get("checked") == "true" else "[ ] "
+            return box if self.list_depth else "- " + box
+        if tag == "en-crypt":
+            return "*(encrypted content not exported)*"
+        if tag == "img":
+            return self.image(node)
+        if tag == "pre" or "-en-codeblock:true" in style:
+            return self.code_block(node, tag == "pre", recorded_language(style))
+        if tag in HEADING_TAGS:
+            return self.heading(node, int(tag[1]))
+        if tag in ("ul", "ol"):
+            return self.bullet_list(node, tag == "ol", style)
+        if tag == "table":
+            return self.table(node)
+        if tag == "blockquote" and not is_indent(node):
+            return self.blockquote(node)
+        if tag == "p":
+            return PARA + self.block_children(node) + PARA
+        if tag in BLOCK_TAGS or tag == "blockquote":
+            if INDENT_STYLE.search(style) or tag == "blockquote":
+                return INDENT_START + LINE + self.block_children(node) + LINE + INDENT_END
+            return LINE + self.block_children(node) + LINE
+        if tag == "hr":
+            return PARA + DIVIDER + PARA
+        if tag == "a":
+            inline = self.link(node)
+        elif tag in CODE_TAGS or is_monospace(node):
+            inline = self.inline_code(node)
+        else:
+            marks = [mark for applies, mark in (
+                (tag in ("b", "strong") or re.search(
+                    r"font-weight:(bold|[6-9]00)", style), "**"),
+                (tag in ("i", "em", "cite") or "font-style:italic" in style, "*"),
+                (tag in ("s", "strike", "del") or "line-through" in style, "~~"),
+                ("--en-highlight:" in style or "-evernote-highlight:true" in style, "=="),
+                (tag in ("u", "ins") or "underline" in style, "<u>"),
+            ) if applies]
+            inline = self.wrap(node, marks)
+        # a block colours its own lines in block_children; an inline element here
+        return self.colored(inline) if own_color else inline
+
+    # Text and inline elements
+
+    def text(self, value: str) -> str:
+        value = CONTROL_CHARS.sub("", value).replace("\xa0", " ")
+        if self.code:
+            return value.replace("\r", "").replace("\n", "")
+        return escape(re.sub(r"\s+", " ", value))
 
     def colored(self, text: str) -> str:
         """Shows each line of text in the current colour, keeping list markers outside."""
         if not self.color or self.code:
             return text
         opening = f'<span style="color: {self.color}">'
-        parts = SEGMENTS.split(text)
+        parts = BARE_MARKER_RUN.split(text)
         for index in range(0, len(parts), 2):  # odd parts are line markers
-            part = parts[index]
-            core = part.strip()
+            lead, core, trail = split_space(parts[index])
             prefix_match = LIST_PREFIX.match(core)
             prefix = prefix_match.group(0) if prefix_match else ""
             body = core[len(prefix):]
@@ -710,16 +683,8 @@ class NoteRenderer:
             # were coloured as it rendered
             if not body or "\n" in body or (body.startswith(opening) and body.endswith("</span>")):
                 continue
-            lead = part[:len(part) - len(part.lstrip())]
-            trail = part[len(part.rstrip()):]
             parts[index] = f"{lead}{prefix}{opening}{body}</span>{trail}"
         return "".join(parts)
-
-    def text(self, value: str) -> str:
-        value = CONTROL_CHARS.sub("", value).replace("\xa0", " ")
-        if self.code:
-            return value.replace("\r", "").replace("\n", "")
-        return MARKDOWN_SPECIAL.sub(r"\\\1", re.sub(r"\s+", " ", value))
 
     def wrap(self, element: Element, marks: list[str]) -> str:
         """Renders an element's content inside the marks, such as ** or <u>, not yet open."""
@@ -729,11 +694,9 @@ class NoteRenderer:
             inner = self.children(element)
         finally:
             self.marks.difference_update(marks)
-        core = inner.strip()
+        lead, core, trail = split_space(inner)
         if not marks or not core or any(marker in inner for marker in MARKERS):
             return inner
-        lead = inner[:len(inner) - len(inner.lstrip())]
-        trail = inner[len(inner.rstrip()):]
         closing = "".join("</" + mark[1:] if mark.startswith("<") else mark
                           for mark in reversed(marks))
         return f"{lead}{''.join(marks)}{core}{closing}{trail}"
@@ -741,13 +704,11 @@ class NoteRenderer:
     def link(self, element: Element) -> str:
         href = (element.attrs.get("href") or "").strip()
         label = self.children(element)
-        core = label.strip()
+        lead, core, trail = split_space(label)
         if (not href or not core or href.startswith("#")
                 or href.lower().startswith("javascript:")
                 or any(marker in label for marker in MARKERS)):
             return label
-        lead = label[:len(label) - len(label.lstrip())]
-        trail = label[len(label.rstrip()):]
         if href.lower().startswith("evernote:"):
             title = re.sub(r"\s+", " ", raw_text(element)).strip()
             return lead + self.add_note_link(core, title, href) + trail
@@ -761,29 +722,132 @@ class NoteRenderer:
         pad = " " if text.startswith("`") or text.endswith("`") else ""
         return f"{ticks}{pad}{text}{pad}{ticks}"
 
+    # Attachments and pictures
+
+    def media(self, element: Element) -> str:
+        key = (element.attrs.get("hash") or "").lower()
+        attachment = self.attachments.get(key)
+        if attachment is None:
+            self.missing += 1
+            return ""
+        self.used.add(key)
+        return self.embed(attachment)
+
+    def image(self, element: Element) -> str:
+        src = (element.attrs.get("src") or "").strip()
+        if src.startswith("data:"):
+            attachment = self.save_data_uri(src)
+            return self.embed(attachment) if attachment else ""
+        if not src:
+            return ""
+        alt = escape(
+            re.sub(r"\s+", " ", element.attrs.get("alt") or "").strip())
+        return f"![{alt}]({link_target(src)})"
+
+    def save_data_uri(self, src: str) -> Attachment | None:
+        match = re.match(r"data:([\w/+.-]*)((?:;[^,]*)?),(.*)", src, re.S)
+        if not match:
+            return None
+        try:
+            if ";base64" in match.group(2):
+                data = base64.b64decode(match.group(3))
+            else:
+                data = unquote_to_bytes(match.group(3))
+        except ValueError:
+            return None
+        if not data:
+            return None
+        mime = match.group(1) or "application/octet-stream"
+        return self.folder.save_attachment(Resource(data, mime))
+
+    def embed(self, attachment: Attachment) -> str:
+        """Shows a picture or a PDF in the note, as Obsidian can; any other file is a block
+        with its link, as Evernote shows it, or a bare link in a table cell."""
+        target = local_link(attachment.path)
+        if (attachment.mime.startswith("image/") or attachment.mime == "application/pdf"
+                or attachment.name.lower().endswith(".pdf")):
+            return f"![]({target})"
+        link = f"[{escape(attachment.name)}]({target})"
+        if self.cell_depth:
+            return link
+        # a callout, which Obsidian draws as a box; other editors show a quote
+        return PARA + f"> [!attachment] {link}" + PARA
+
+    # Code
+
+    @contextlib.contextmanager
+    def in_code(self):
+        """Renders text as typed, for a code block."""
+        self.code = True
+        try:
+            yield
+        finally:
+            self.code = False
+
     def code_block(self, element: Element, is_pre: bool, language: str | None) -> str:
         if is_pre:
             text = raw_text(element).replace("\xa0", " ").replace("\r", "")
         else:
-            self.code = True
-            try:
-                text = CODE_MARKER_RUN.sub(
+            with self.in_code():
+                text = BARE_MARKER_RUN.sub(
                     code_newlines, self.block_children(element))
-            finally:
-                self.code = False
         return self.fence(text, language)
+
+    def code_lines(self, lines: list[Element]) -> str:
+        """Renders monospaced lines pasted from an editor as one code block."""
+        if not any(code_text(line) for line in lines):
+            # empty lines alone are just blank lines
+            return "".join(map(self.node, lines))
+        # an Evernote code block among the lines keeps the language it recorded
+        recorded = [recorded_language(style) for style in map(style_of, lines)
+                    if "-en-codeblock:true" in style]
+        language = next(
+            (value for value in recorded if value is not None), None)
+        with self.in_code():
+            text = BARE_MARKER_RUN.sub(
+                code_newlines, LINE.join(map(self.node, lines)))
+        return self.fence(text, language)
+
+    def fence(self, text: str, language: str | None) -> str:
+        """Fences a code block; with no language recorded (None), its language is decided later."""
+        # code inside an indent starts at the margin, keeping its own indentation
+        text = textwrap.dedent(text.strip("\n").rstrip())
+        if not text.strip():
+            return ""
+        if language is None:
+            self.languages.append(language_scores(text, self.hints))
+            language = f"\x07{len(self.languages) - 1}\x07"
+        else:
+            self.languages.append(language)
+        return fenced(text, language)
+
+    def fill_languages(self, body: str) -> str:
+        """Names each guessed block's language, taking the note's usual language when the
+        block's own code is too short to tell but fits it."""
+        named = [entry if isinstance(entry, str) else confident_language(entry)
+                 for entry in self.languages]
+        usual = collections.Counter(
+            language for language in named if language).most_common(1)
+
+        def language(match: re.Match) -> str:
+            index = int(match.group(1))
+            scores = self.languages[index]
+            if named[index] or not usual or isinstance(scores, str):
+                return named[index]
+            best = usual[0][0]
+            # the usual language may be one Evernote recorded that isn't guessed, such as ruby
+            score = scores.get(best, 0)
+            return best if score >= 1 and score == max(scores.values()) else ""
+
+        return LANGUAGE_SLOT.sub(language, body)
+
+    # Headings, lists, tables and quotes
 
     def heading(self, element: Element, level: int) -> str:
         text = re.sub(r"\\?\n", " ", resolve(self.block_children(element)))
         return PARA + "#" * level + " " + text + PARA if text else ""
 
-    def blockquote(self, element: Element) -> str:
-        body = resolve(self.block_children(element))
-        if not body:
-            return ""
-        return PARA + "\n".join("> " + line if line else ">" for line in body.split("\n")) + PARA
-
-    def list(self, element: Element, ordered: bool, style: str) -> str:
+    def bullet_list(self, element: Element, ordered: bool, style: str) -> str:
         todo = "--en-todo:true" in style
         start = element.attrs.get("start") or ""
         number = int(start) if start.isdigit() else 1
@@ -807,8 +871,7 @@ class NoteRenderer:
                 child_style = ""
                 if isinstance(child, Element) and is_item:
                     item = child
-                    child_style = (item.attrs.get("style")
-                                   or "").replace(" ", "").lower()
+                    child_style = style_of(item)
                     body = resolve(self.with_color(
                         item, child_style, lambda own: self.block_children(item)))
                 else:
@@ -860,213 +923,42 @@ class NoteRenderer:
             self.cell_depth -= 1
         return re.sub(r"\\?\n+", "<br>", text)
 
-    def media(self, element: Element) -> str:
-        key = (element.attrs.get("hash") or "").lower()
-        attachment = self.attachments.get(key)
-        if attachment is None:
-            self.missing += 1
+    def blockquote(self, element: Element) -> str:
+        body = resolve(self.block_children(element))
+        if not body:
             return ""
-        self.used.add(key)
-        return self.embed(attachment)
-
-    def image(self, element: Element) -> str:
-        src = (element.attrs.get("src") or "").strip()
-        if src.startswith("data:"):
-            attachment = self.save_data_uri(src)
-            return self.embed(attachment) if attachment else ""
-        if not src:
-            return ""
-        alt = MARKDOWN_SPECIAL.sub(r"\\\1", re.sub(
-            r"\s+", " ", element.attrs.get("alt") or "").strip())
-        return f"![{alt}]({link_target(src)})"
-
-    def save_data_uri(self, src: str) -> Attachment | None:
-        match = re.match(r"data:([\w/+.-]*)((?:;[^,]*)?),(.*)", src, re.S)
-        if not match:
-            return None
-        try:
-            if ";base64" in match.group(2):
-                data = base64.b64decode(match.group(3))
-            else:
-                data = unquote_to_bytes(match.group(3))
-        except (binascii.Error, ValueError):
-            return None
-        if not data:
-            return None
-        mime = match.group(1) or "application/octet-stream"
-        return self.folder.save_attachment(Resource(data, mime, "", hashlib.md5(data).hexdigest()))
-
-    def embed(self, attachment: Attachment) -> str:
-        """Shows a picture or a PDF in the note, as Obsidian can; any other file is a block
-        with its link, as Evernote shows it, or a bare link in a table cell."""
-        target = local_link(attachment.path)
-        if (attachment.mime.startswith("image/") or attachment.mime == "application/pdf"
-                or attachment.name.lower().endswith(".pdf")):
-            return f"![]({target})"
-        name = MARKDOWN_SPECIAL.sub(r"\\\1", attachment.name)
-        link = f"[{name}]({target})"
-        if self.cell_depth:
-            return link
-        # a callout, which Obsidian draws as a box; other editors show a quote
-        return PARA + f"> [!attachment] {link}" + PARA
+        return PARA + "\n".join("> " + line if line else ">" for line in body.split("\n")) + PARA
 
 
-class Element:
-    """An HTML element of a note's body."""
-    __slots__ = ("tag", "attrs", "children")
+# Reading the HTML tree
 
-    def __init__(self, tag: str, attrs: list[tuple[str, str | None]]):
-        self.tag = tag
-        self.attrs = dict(attrs)
-        self.children: list[Element | str] = []
+def style_of(element: Element) -> str:
+    """Returns an element's inline style in lower case without spaces, ready to match."""
+    return (element.attrs.get("style") or "").lower().replace(" ", "")
 
 
-class TreeBuilder(HTMLParser):
-    """Builds an Element tree from HTML that may not be well formed."""
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.root = Element("root", [])
-        self.stack = [self.root]
-
-    def handle_starttag(self, tag, attrs):
-        element = Element(tag, attrs)
-        self.stack[-1].children.append(element)
-        if tag not in VOID_TAGS:
-            self.stack.append(element)
-
-    def handle_startendtag(self, tag, attrs):
-        self.stack[-1].children.append(Element(tag, attrs))
-
-    def handle_endtag(self, tag):
-        for index in range(len(self.stack) - 1, 0, -1):
-            if self.stack[index].tag == tag:
-                del self.stack[index:]
-                return
-
-    def handle_data(self, data):
-        self.stack[-1].children.append(data)
-
-
-def resolve(text: str) -> str:
-    """Turns the line and paragraph placeholders of a finished block into newlines."""
-    text = ADJACENT_IMAGES.sub(
-        r"\1" + LINE, text)  # each picture on its own line
-    return MARKER_RUN.sub(newlines, text).strip()
-
-
-def newlines(match: re.Match) -> str:
-    run, text = match.group(0), match.string
-    if match.start() == 0 or match.end() == len(text):
-        return "\n"  # the block's edge, stripped by resolve()
-    block_gap = PARA in run
-    # the <br> of each empty <div> is a blank line; between lines, the first
-    # newline only ends the line
-    blank = run.count(BREAK) if block_gap else newline_count(run) - 1
-    if INDENT_END in run and INDENT_START not in run:
-        blank = max(blank, 1)  # the indented lines end here
-    before_block = BLOCK_START.match(text, match.end())
-    line_start = max(text.rfind(char, 0, match.start())
-                     for char in ("\n", *MARKERS)) + 1
-    if text[line_start:match.start()] == DIVIDER or DIVIDER_START.match(text, match.end()):
-        # Obsidian draws a divider with a blank line's margin around it, so the
-        # bare blank line Markdown needs there is all the space it gets
-        return "\n\n"
-    if IMAGE_LINE_END.search(text, line_start, match.start()):
-        blank = 1  # always one blank line under a picture, however many were typed
-    # a line after a list item, such as a to-do line, would join the item
-    after_item = LIST_ITEM.match(text, line_start)
-    if not blank:
-        if block_gap or (after_item and not before_block):
-            return "\n\n"
-        return "\n" if before_block else HARD_BREAK
-    if before_block:
-        return "\n\n" + (BLANK_LINE + "\n\n") * blank
-    if block_gap or after_item:
-        return "\n\n" + (BLANK_LINE + HARD_BREAK) * blank
-    return HARD_BREAK + (BLANK_LINE + HARD_BREAK) * blank
-
-
-def code_newlines(match: re.Match) -> str:
-    return "\n" * newline_count(match.group(0))
-
-
-def newline_count(run: str) -> int:
-    block = 2 if PARA in run else 1 if LINE in run else 0
-    return max(block, run.count(BREAK) + (1 if block else 0))
-
-
-def join_touching_code(text: str) -> str:
-    """Joins pieces of inline code that touch, as pieces from different nesting levels can:
-    `a``b` would read as one broken piece."""
-    return TOUCHING_CODE.sub(lambda match: "`" + match.group(0)[1:-1].replace("``", "") + "`", text)
-
-
-def fenced(text: str, language: str) -> str:
-    """Wraps code in a fence longer than any run of backticks it holds, naming its language."""
-    fence = "`" * max(3, longest_run(text, "`") + 1)
-    return PARA + f"{fence}{language}\n{text}\n{fence}" + PARA
-
-
-def recorded_language(style: str) -> str | None:
-    """Returns the language of an Evernote code block, "" for plain text, None if it has none."""
-    match = re.search(r"--en-syntaxlanguage:([\w#+-]+)", style)
-    if not match:
+def text_color(element: Element, style: str) -> str | None:
+    """Returns the text colour an element sets, unless it's a default one (black, grey)."""
+    match = COLOR_STYLE.search(style)
+    if match:
+        value = match.group(1)
+    elif element.tag == "font":
+        value = (element.attrs.get("color") or "").lower().replace(" ", "")
+    else:
         return None
-    language = match.group(1)
-    return "" if language in ("plaintext", "text", "plain") else EVERNOTE_LANGUAGES.get(language, language)
-
-
-def guess_language(code: str, hints: tuple[str, ...] = ()) -> str:
-    """Names the language of a piece of code, or "" when unsure; hints are languages its note names."""
-    return confident_language(language_scores(code, hints))
-
-
-def language_scores(code: str, hints: tuple[str, ...] = ()) -> dict[str, int]:
-    """Scores each language by the patterns of it the code has, and a point if its note names it.
-
-    A tag that opens the code makes it markup outright, since CSS or script
-    inside a page is still the page; valid JSON is JSON.
-    """
-    scores = dict.fromkeys(LANGUAGE_PATTERNS, 0)
-    stripped = code.strip()
-    if stripped[:1] in "{[":
-        try:
-            json.loads(stripped)
-            return {**scores, "json": 10}
-        except ValueError:
-            pass
-    if stripped.startswith("<") and re.search(r"</[\w:.-]+>|/>", code):
-        markup = "xml" if re.search(
-            r"<\?xml|<xsl:|xmlns(:\w+)?=\"http://www\.w3\.org/1999/XSL", code) else "html"
-        return {**scores, markup: 10}
-    lines = [line for line in stripped.split(
-        "\n") if line.strip() and not line.lstrip().startswith("#")]
-    if len(lines) >= 2 and not re.search(r"[;{}]", code) and all(map(YAML_LINE.match, lines)):
-        # keys and list items only, such as a docker-compose file
-        return {**scores, "yaml": 10}
-    for language, patterns in LANGUAGE_PATTERNS.items():
-        scores[language] = sum(
-            weight for pattern, weight in patterns if pattern.search(code))
-    if lines and all(re.match(SHELL_COMMAND, line) for line in lines):
-        # nothing but commands, such as one "brew install"
-        scores["bash"] += STRONG
-    for language in hints:
-        scores[language] += 1
-    return scores
-
-
-def confident_language(scores: dict[str, int]) -> str:
-    """Names the best-scoring language when it has two points and a clear lead, since a
-    wrong language colours code worse than none; otherwise ""."""
-    ranked = sorted(scores.items(), key=lambda item: -item[1])
-    (best, top), (_, second) = ranked[0], ranked[1]
-    return best if top >= 2 and top > second else ""
-
-
-def title_languages(title: str) -> tuple[str, ...]:
-    """Returns the languages a note's title names, such as css for "Gradients CSS3"."""
-    return tuple(language for language, pattern in TITLE_LANGUAGES.items() if pattern.search(title))
+    value = value.replace("!important", "")
+    if not SAFE_COLOR.fullmatch(value) or value in NEUTRAL_COLORS:
+        return None
+    rgb = RGB_COLOR.fullmatch(value)
+    if rgb:
+        channels = rgb.groups()
+    elif re.fullmatch(r"#[0-9a-f]{6}", value):
+        channels = (value[1:3], value[3:5], value[5:7])
+    elif re.fullmatch(r"#[0-9a-f]{3}", value):
+        channels = tuple(value[1:])
+    else:
+        return value  # a named colour
+    return None if len(set(channels)) == 1 else value
 
 
 def is_monospace(element: Element) -> bool:
@@ -1081,8 +973,7 @@ def is_monospace(element: Element) -> bool:
 
 def is_indent(element: Element) -> bool:
     """Tells whether a blockquote is older Evernote's indent, drawn with no quote bar."""
-    style = (element.attrs.get("style") or "").lower().replace(" ", "")
-    return element.tag == "blockquote" and "border:none" in style
+    return element.tag == "blockquote" and "border:none" in style_of(element)
 
 
 def is_code_line(element: Element) -> bool:
@@ -1137,13 +1028,6 @@ def raw_text(element: Element) -> str:
     return "".join(parts)
 
 
-def indent(text: str, width: int, first: bool = True) -> str:
-    lines = text.split("\n")
-    pad = " " * width
-    indented = [pad + line if line else "" for line in lines[1:]]
-    return "\n".join([(pad if first and lines[0] else "") + lines[0]] + indented)
-
-
 def table_rows(table: Element):
     for child in table.children:
         if isinstance(child, Element):
@@ -1154,12 +1038,91 @@ def table_rows(table: Element):
                             if isinstance(row, Element) and row.tag == "tr")
 
 
+# Writing Markdown
+
+def resolve(text: str) -> str:
+    """Turns the line and paragraph placeholders of a finished block into newlines."""
+    text = ADJACENT_IMAGES.sub(
+        r"\1" + LINE, text)  # each picture on its own line
+    return MARKER_RUN.sub(newlines, text).strip()
+
+
+def newlines(match: re.Match) -> str:
+    run, text = match.group(0), match.string
+    if match.start() == 0 or match.end() == len(text):
+        return "\n"  # the block's edge, stripped by resolve()
+    block_gap = PARA in run
+    # the <br> of each empty <div> is a blank line; between lines, the first
+    # newline only ends the line
+    blank = run.count(BREAK) if block_gap else newline_count(run) - 1
+    if INDENT_END in run and INDENT_START not in run:
+        blank = max(blank, 1)  # the indented lines end here
+    before_block = BLOCK_START.match(text, match.end())
+    line_start = max(text.rfind(char, 0, match.start())
+                     for char in ("\n", *MARKERS)) + 1
+    if text[line_start:match.start()] == DIVIDER or DIVIDER_START.match(text, match.end()):
+        # Obsidian draws a divider with a blank line's margin around it, so the
+        # bare blank line Markdown needs there is all the space it gets
+        return "\n\n"
+    if IMAGE_LINE_END.search(text, line_start, match.start()):
+        blank = 1  # always one blank line under a picture, however many were typed
+    # a line after a list item, such as a to-do line, would join the item
+    after_item = LIST_ITEM.match(text, line_start)
+    if not blank:
+        if block_gap or (after_item and not before_block):
+            return "\n\n"
+        return "\n" if before_block else HARD_BREAK
+    if before_block:
+        return "\n\n" + (BLANK_LINE + "\n\n") * blank
+    if block_gap or after_item:
+        return "\n\n" + (BLANK_LINE + HARD_BREAK) * blank
+    return HARD_BREAK + (BLANK_LINE + HARD_BREAK) * blank
+
+
+def code_newlines(match: re.Match) -> str:
+    return "\n" * newline_count(match.group(0))
+
+
+def newline_count(run: str) -> int:
+    block = 2 if PARA in run else 1 if LINE in run else 0
+    return max(block, run.count(BREAK) + (1 if block else 0))
+
+
+def split_space(text: str) -> tuple[str, str, str]:
+    """Splits text into its leading space, its content and its trailing space."""
+    return text[:len(text) - len(text.lstrip())], text.strip(), text[len(text.rstrip()):]
+
+
+def escape(text: str) -> str:
+    """Escapes the characters Markdown would read as formatting."""
+    return MARKDOWN_SPECIAL.sub(r"\\\1", text)
+
+
+def indent(text: str, width: int, first: bool = True) -> str:
+    lines = text.split("\n")
+    pad = " " * width
+    indented = [pad + line if line else "" for line in lines[1:]]
+    return "\n".join([(pad if first and lines[0] else "") + lines[0]] + indented)
+
+
 def table_row(cells: list[str]) -> str:
     return "| " + " | ".join(cells) + " |"
 
 
+def fenced(text: str, language: str) -> str:
+    """Wraps code in a fence longer than any run of backticks it holds, naming its language."""
+    fence = "`" * max(3, longest_run(text, "`") + 1)
+    return PARA + f"{fence}{language}\n{text}\n{fence}" + PARA
+
+
 def longest_run(text: str, char: str) -> int:
     return max((len(run) for run in re.findall(re.escape(char) + "+", text)), default=0)
+
+
+def join_touching_code(text: str) -> str:
+    """Joins pieces of inline code that touch, as pieces from different nesting levels can:
+    `a``b` would read as one broken piece."""
+    return TOUCHING_CODE.sub(lambda match: "`" + match.group(0)[1:-1].replace("``", "") + "`", text)
 
 
 def link_target(url: str) -> str:
@@ -1170,33 +1133,65 @@ def local_link(path: str) -> str:
     return PATH_SPECIAL.sub(lambda match: quote(match.group(0)), path.replace(os.sep, "/"))
 
 
-def find_enex_files(inputs: list[str], parser: argparse.ArgumentParser) -> list[str]:
-    files = []
-    for path in inputs:
-        if os.path.isdir(path):
-            files += sorted(os.path.join(path, name) for name in os.listdir(path)
-                            if name.lower().endswith(".enex"))
-        elif os.path.isfile(path):
-            files.append(path)
-        else:
-            parser.error(f"{path} does not exist")
-    if not files:
-        parser.error("no .enex files found")
-    return files
+# Code languages
+
+def recorded_language(style: str) -> str | None:
+    """Returns the language of an Evernote code block, "" for plain text, None if it has none."""
+    match = re.search(r"--en-syntaxlanguage:([\w#+-]+)", style)
+    if not match:
+        return None
+    language = match.group(1)
+    return "" if language in ("plaintext", "text", "plain") else EVERNOTE_LANGUAGES.get(language, language)
 
 
-def output_plan(files: list[str], output: str | None, flat: bool) -> list[tuple[str, str]]:
-    """Pairs each .enex file with the folder its notes go to."""
-    def stem(path: str) -> str:
-        return safe_name(os.path.splitext(os.path.basename(path))[0])
+def title_languages(title: str) -> tuple[str, ...]:
+    """Returns the languages a note's title names, such as css for "Gradients CSS3"."""
+    return tuple(language for language, pattern in TITLE_LANGUAGES.items() if pattern.search(title))
 
-    if output is None:
-        return [(path, os.path.join(os.path.dirname(os.path.abspath(path)), stem(path)))
-                for path in files]
-    if len(files) == 1 or flat:
-        return [(path, output) for path in files]
-    return [(path, os.path.join(output, stem(path))) for path in files]
 
+def language_scores(code: str, hints: tuple[str, ...] = ()) -> dict[str, int]:
+    """Scores each language by the patterns of it the code has, and a point if its note names it.
+
+    A tag that opens the code makes it markup outright, since CSS or script
+    inside a page is still the page; valid JSON is JSON.
+    """
+    scores = dict.fromkeys(LANGUAGE_PATTERNS, 0)
+    stripped = code.strip()
+    if stripped[:1] in "{[":
+        try:
+            json.loads(stripped)
+            return {**scores, "json": 10}
+        except ValueError:
+            pass
+    if stripped.startswith("<") and re.search(r"</[\w:.-]+>|/>", code):
+        markup = "xml" if re.search(
+            r"<\?xml|<xsl:|xmlns(:\w+)?=\"http://www\.w3\.org/1999/XSL", code) else "html"
+        return {**scores, markup: 10}
+    lines = [line for line in stripped.split(
+        "\n") if line.strip() and not line.lstrip().startswith("#")]
+    if len(lines) >= 2 and not re.search(r"[;{}]", code) and all(map(YAML_LINE.match, lines)):
+        # keys and list items only, such as a docker-compose file
+        return {**scores, "yaml": 10}
+    for language, patterns in LANGUAGE_PATTERNS.items():
+        scores[language] = sum(
+            weight for pattern, weight in patterns if pattern.search(code))
+    if lines and all(re.match(SHELL_COMMAND, line) for line in lines):
+        # nothing but commands, such as one "brew install"
+        scores["bash"] += STRONG
+    for language in hints:
+        scores[language] += 1
+    return scores
+
+
+def confident_language(scores: dict[str, int]) -> str:
+    """Names the best-scoring language when it has two points and a clear lead, since a
+    wrong language colours code worse than none; otherwise ""."""
+    ranked = sorted(scores.items(), key=lambda item: -item[1])
+    (best, top), (_, second) = ranked[0], ranked[1]
+    return best if top >= 2 and top > second else ""
+
+
+# Command line
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
@@ -1234,6 +1229,34 @@ def main(argv: list[str] | None = None) -> None:
     if exporter.note_links:
         print(f"Linked {exporter.linked} of {len(exporter.note_links)} links between notes "
               "(the rest point at notes that aren't in the export)", file=sys.stderr)
+
+
+def find_enex_files(inputs: list[str], parser: argparse.ArgumentParser) -> list[str]:
+    files = []
+    for path in inputs:
+        if os.path.isdir(path):
+            files += sorted(os.path.join(path, name) for name in os.listdir(path)
+                            if name.lower().endswith(".enex"))
+        elif os.path.isfile(path):
+            files.append(path)
+        else:
+            parser.error(f"{path} does not exist")
+    if not files:
+        parser.error("no .enex files found")
+    return files
+
+
+def output_plan(files: list[str], output: str | None, flat: bool) -> list[tuple[str, str]]:
+    """Pairs each .enex file with the folder its notes go to."""
+    def stem(path: str) -> str:
+        return safe_name(os.path.splitext(os.path.basename(path))[0])
+
+    if output is None:
+        return [(path, os.path.join(os.path.dirname(os.path.abspath(path)), stem(path)))
+                for path in files]
+    if len(files) == 1 or flat:
+        return [(path, output) for path in files]
+    return [(path, os.path.join(output, stem(path))) for path in files]
 
 
 if __name__ == "__main__":

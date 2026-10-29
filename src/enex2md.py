@@ -150,6 +150,8 @@ SAFE_COLOR = re.compile(r"[#\w(),.%]+")
 RGB_COLOR = re.compile(r"rgba?\((\d+),(\d+),(\d+)(?:,[\d.]+)?\)")
 NEUTRAL_COLORS = {"black", "white", "gray", "grey", "inherit", "initial", "unset",
                   "currentcolor", "transparent"}
+# How far apart a colour's red, green and blue can be for it to count as a grey
+GREY_SPREAD = 24
 
 # Code languages
 # Evernote's names for code block languages that Obsidian names differently
@@ -964,14 +966,15 @@ def text_color(element: Element, style: str) -> str | None:
         return None
     rgb = RGB_COLOR.fullmatch(value)
     if rgb:
-        channels = rgb.groups()
+        channels = [int(channel) for channel in rgb.groups()]
     elif re.fullmatch(r"#[0-9a-f]{6}", value):
-        channels = (value[1:3], value[3:5], value[5:7])
+        channels = [int(value[i:i + 2], 16) for i in (1, 3, 5)]
     elif re.fullmatch(r"#[0-9a-f]{3}", value):
-        channels = tuple(value[1:])
+        channels = [int(digit * 2, 16) for digit in value[1:]]
     else:
         return value  # a named colour
-    return None if len(set(channels)) == 1 else value
+    # a grey, maybe slightly tinted, as text pasted from a web page often has
+    return None if max(channels) - min(channels) <= GREY_SPREAD else value
 
 
 def is_monospace(element: Element) -> bool:

@@ -70,6 +70,7 @@ import base64
 import collections
 import contextlib
 import hashlib
+import html
 import json
 import mimetypes
 import os
@@ -936,9 +937,12 @@ class NoteRenderer:
 
 # Reading the HTML tree
 
-def style_of(element: Element) -> str:
-    """Returns an element's inline style in lower case without spaces, ready to match."""
-    return (element.attrs.get("style") or "").lower().replace(" ", "")
+def style_of(element: Element, spaces: bool = False) -> str:
+    """Returns an element's inline style in lower case, without spaces unless asked, ready
+    to match; quotes some notes store encoded, as in font-family: &apos;Courier New&apos;,
+    are decoded."""
+    style = html.unescape(element.attrs.get("style") or "").lower()
+    return style if spaces else style.replace(" ", "")
 
 
 def text_color(element: Element, style: str) -> str | None:
@@ -967,8 +971,7 @@ def text_color(element: Element, style: str) -> str | None:
 
 def is_monospace(element: Element) -> bool:
     """Tells whether an element sets a monospaced font, as code pasted from an editor has."""
-    style = (element.attrs.get("style") or "").lower()
-    match = re.search(r"font-family:([^;]+)", style)
+    match = re.search(r"font-family:([^;]+)", style_of(element, spaces=True))
     family = match.group(1) if match else (
         element.attrs.get("face") or "").lower()
     first = family.split(",")[0].strip(" '\"")

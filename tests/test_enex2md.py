@@ -662,6 +662,11 @@ class TestCode(ExportTest):
              f"<div><font {CONSOLAS}>a</font></div>\n<div><font {CONSOLAS}>b</font></div>", "```\na\nb\n```"),
             ("Courier lines", "<div><span style=\"font-family: 'Courier New';\">a</span></div>"
                               "<div><span style=\"font-family: 'Courier New';\">&nbsp; b</span></div>", "```\na\n  b\n```"),
+            ("a font name whose quotes are stored encoded",
+             '<div style="font-family: &amp;apos;Courier New&amp;apos;;">&lt;h1&gt;</div>'
+             '<div style="font-family: &amp;apos;courier new&amp;apos;, courier, monospace;">&nbsp; x</div>'
+             '<div style="font-family: &amp;apos;Courier New&amp;apos;;">&lt;/h1&gt;</div>',
+             "```html\n<h1>\n  x\n</h1>\n```"),
             ("one monospaced block with line breaks",
              '<div style="font-family: Consolas;">f(<br/>\n    x)</div>', "```\nf(\n    x)\n```"),
             ("old indent inside code becomes spaces",

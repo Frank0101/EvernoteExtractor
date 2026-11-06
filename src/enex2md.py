@@ -27,13 +27,16 @@ How the conversion works, and why:
   html.parser, since web clips are often not well-formed XML and use HTML
   entities, such as &nbsp;, that an XML parser rejects.
 - Evernote writes one <div> per line and an empty <div><br/></div> per blank
-  line, so a <div> becomes a line break, not a paragraph; otherwise every note
-  would come out double-spaced. A line break is a bare newline, which
+  line, and shows a small gap between lines typed with Enter, but none in a
+  line that wraps. So each line becomes a paragraph of its own, which Obsidian
+  shows with such a gap. A line break within a line (Shift+Enter), and the
+  lines of a list item, quote or table cell, are a bare newline, which
   Obsidian shows as typed; most other previews (VS Code, GitHub) join such
   lines, and would need HARD_BREAK set to Markdown's backslash break.
-- A blank line typed in Evernote becomes a line holding only &nbsp;: a bare
-  blank line in Markdown only separates paragraphs, which a preview shows as
-  a gap smaller than a line, or not at all next to a list or a divider.
+- A blank line typed in Evernote, which marks a new section, becomes a
+  paragraph holding only &nbsp;, between the sections it parts: a bare blank
+  line in Markdown only separates paragraphs, so it couldn't show the bigger
+  gap of a new section.
 - Links between notes carry Evernote IDs that the export doesn't map to notes,
   so they are matched by their text to a note's title once every note is
   written; a link that matches no note keeps its evernote:// address.
@@ -109,9 +112,6 @@ NOTE_LINK = re.compile(r"\x06(\d+)\x06")
 # the end of a block, would show as a literal backslash.
 BLOCK_START = re.compile(r"(?:[-*+] |\d+[.)] |#|>|\||```|~~~|---)")
 LIST_ITEM = re.compile(r"[ \t]*(?:[-*+]|\d+[.)]) ")
-# A line of a block that a next line would join: a list item, a quote, a table
-# row, or an indented line of one of them
-BLOCK_LINE = re.compile(r"[ \t]|(?:[-*+]|\d+[.)]) |>|\|")
 LIST_PREFIX = re.compile(r"(?:[-*+]|\d+\.) (?:\[[ x]\] )?")
 IMAGE_LINE_END = re.compile(r"!\[[^\]]*\]\([^()\s]*\)(?:</span>)*$")
 ADJACENT_IMAGES = re.compile(r"(!\[[^\]]*\]\([^()\s]*\))[ \t]*(?=!\[)")
@@ -519,7 +519,7 @@ class NoteRenderer:
         builder = TreeBuilder()
         builder.feed(enml)
         builder.close()
-        body = resolve(self.block_children(builder.root))
+        body = resolve(self.block_children(builder.root), paragraphs=True)
         unused = [att for key, att in self.attachments.items()
                   if key not in self.used]
         for attachment in unused:
@@ -1058,14 +1058,15 @@ def table_rows(table: Element):
 
 # Writing Markdown
 
-def resolve(text: str) -> str:
-    """Turns the line and paragraph placeholders of a finished block into newlines."""
+def resolve(text: str, paragraphs: bool = False) -> str:
+    """Turns the line and paragraph placeholders of a finished block into newlines; with
+    paragraphs, each line of the block is a paragraph of its own."""
     text = ADJACENT_IMAGES.sub(
         r"\1" + LINE, text)  # each picture on its own line
-    return MARKER_RUN.sub(newlines, text).strip()
+    return MARKER_RUN.sub(lambda match: newlines(match, paragraphs), text).strip()
 
 
-def newlines(match: re.Match) -> str:
+def newlines(match: re.Match, paragraphs: bool = False) -> str:
     run, text = match.group(0), match.string
     if match.start() == 0 or match.end() == len(text):
         return "\n"  # the block's edge, stripped by resolve()
@@ -1082,21 +1083,19 @@ def newlines(match: re.Match) -> str:
         # Obsidian draws a divider with a blank line's margin around it, so the
         # bare blank line Markdown needs there is all the space it gets
         return "\n\n"
-    after_image = IMAGE_LINE_END.search(text, line_start, match.start())
-    if after_image:
+    if IMAGE_LINE_END.search(text, line_start, match.start()):
         blank = 1  # always one blank line under a picture, however many were typed
     # a line after a list item, such as a to-do line, would join the item
     after_item = LIST_ITEM.match(text, line_start)
     if not blank:
-        if block_gap or (after_item and not before_block):
+        # each line is a paragraph, and so is a picture in a list item, which
+        # Evernote draws on a line of its own with the gap of one
+        if block_gap or (after_item and not before_block) or (LINE in run and not before_block and (
+                paragraphs or text.startswith("![", match.end()))):
             return "\n\n"
         return "\n" if before_block else HARD_BREAK
-    if before_block:
-        if not BLOCK_LINE.match(text, line_start) and not after_image:
-            # after a line of text the blank lines are its next lines, so they
-            # show as typed, not with a paragraph's spacing around each; under a
-            # picture they look tighter so, and keep a paragraph of their own
-            return (HARD_BREAK + BLANK_LINE) * blank + "\n\n"
+    if before_block or paragraphs:
+        # each blank line is a paragraph of its own between the sections it parts
         return "\n\n" + (BLANK_LINE + "\n\n") * blank
     if block_gap or after_item:
         return "\n\n" + (BLANK_LINE + HARD_BREAK) * blank

@@ -109,6 +109,9 @@ NOTE_LINK = re.compile(r"\x06(\d+)\x06")
 # the end of a block, would show as a literal backslash.
 BLOCK_START = re.compile(r"(?:[-*+] |\d+[.)] |#|>|\||```|~~~|---)")
 LIST_ITEM = re.compile(r"[ \t]*(?:[-*+]|\d+[.)]) ")
+# A line of a block that a next line would join: a list item, a quote, a table
+# row, or an indented line of one of them
+BLOCK_LINE = re.compile(r"[ \t]|(?:[-*+]|\d+[.)]) |>|\|")
 LIST_PREFIX = re.compile(r"(?:[-*+]|\d+\.) (?:\[[ x]\] )?")
 IMAGE_LINE_END = re.compile(r"!\[[^\]]*\]\([^()\s]*\)(?:</span>)*$")
 ADJACENT_IMAGES = re.compile(r"(!\[[^\]]*\]\([^()\s]*\))[ \t]*(?=!\[)")
@@ -1079,7 +1082,8 @@ def newlines(match: re.Match) -> str:
         # Obsidian draws a divider with a blank line's margin around it, so the
         # bare blank line Markdown needs there is all the space it gets
         return "\n\n"
-    if IMAGE_LINE_END.search(text, line_start, match.start()):
+    after_image = IMAGE_LINE_END.search(text, line_start, match.start())
+    if after_image:
         blank = 1  # always one blank line under a picture, however many were typed
     # a line after a list item, such as a to-do line, would join the item
     after_item = LIST_ITEM.match(text, line_start)
@@ -1088,6 +1092,11 @@ def newlines(match: re.Match) -> str:
             return "\n\n"
         return "\n" if before_block else HARD_BREAK
     if before_block:
+        if not BLOCK_LINE.match(text, line_start) and not after_image:
+            # after a line of text the blank lines are its next lines, so they
+            # show as typed, not with a paragraph's spacing around each; under a
+            # picture they look tighter so, and keep a paragraph of their own
+            return (HARD_BREAK + BLANK_LINE) * blank + "\n\n"
         return "\n\n" + (BLANK_LINE + "\n\n") * blank
     if block_gap or after_item:
         return "\n\n" + (BLANK_LINE + HARD_BREAK) * blank

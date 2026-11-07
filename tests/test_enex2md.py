@@ -785,6 +785,12 @@ class TestCode(ExportTest):
              f'<div>Before</div><div><font {CONSOLAS}><font color="#0000FF">int</font> x = 1;</font></div>'
              f"<div><font {CONSOLAS}><br/></font></div><div><font {CONSOLAS}>&nbsp;&nbsp;&nbsp; y();</font></div>"
              "<div>After</div>", "Before\n\n```\nint x = 1;\n\n    y();\n```\n\nAfter"),
+            ("an empty line in the code's font after it is a typed blank line, not code",
+             f"<div><font {CONSOLAS}>a</font></div><div><font {CONSOLAS}><br/></font></div><div>b</div>",
+             "```\na\n```\n\n&nbsp;\nb"),
+            ("so is one before it",
+             f"<div>a</div><div><font {CONSOLAS}><br/></font></div><div><font {CONSOLAS}>c</font></div>",
+             "a\n&nbsp;\n&nbsp;\n\n```\nc\n```"),
             ("pasted lines with spaces between them",
              f"<div><font {CONSOLAS}>a</font></div>\n<div><font {CONSOLAS}>b</font></div>", "```\na\nb\n```"),
             ("Courier lines", "<div><span style=\"font-family: 'Courier New';\">a</span></div>"
@@ -859,6 +865,29 @@ class TestLanguageContext(ExportTest):
                     content, title=title).split("\n") if line.startswith("```")]
                 # every other fence opens a block
                 self.assertEqual(fences[::2], expected)
+
+
+class TestLanguageFromTags(ExportTest):
+    """A note's tags name its language as its title does."""
+
+    def test_tags(self):
+        csharp_or_js = '<pre>var id = new Regex("Pot(\\d+)").Matches(text)[0];</pre>'
+        js_clue = "<pre>const id = text.match(pattern)[0];</pre>"
+        for case, code, tags, expected in [
+            ("no tag naming a language", csharp_or_js, ("Develop - Regex",), "```"),
+            ("a C# tag tips code that could be either",
+             csharp_or_js, ("Develop - C#",), "```csharp"),
+            ("a JavaScript tag, with one clue of it in the code",
+             js_clue, ("Develop - Javascript",), "```javascript"),
+            ("a tag can't overrule the code", csharp_or_js,
+             ("Develop - Javascript",), "```"),
+        ]:
+            with self.subTest(case):
+                self.setUp()
+                notes = self.export(
+                    note_xml("Espressioni regolari", code, tags=tags))
+                self.assertEqual(
+                    body_of(notes["Espressioni regolari.md"]).split("\n")[0], expected)
 
 
 class TestLanguageGuess(unittest.TestCase):

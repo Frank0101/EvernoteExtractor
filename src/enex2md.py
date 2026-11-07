@@ -58,8 +58,9 @@ How the conversion works, and why:
   the syntax colours, and a monospaced word in a sentence becomes `code`.
   Old notes indented such code with Evernote's indent, which becomes spaces.
 - A code block keeps the language Evernote recorded; with none, the language
-  is guessed from patterns in the code, the languages the note's title names
-  and the language of the note's other code blocks, and left unset when unsure.
+  is guessed from patterns in the code, the languages the note's title and
+  tags name, and the language of the note's other code blocks, and left unset
+  when unsure.
 - Code is kept as typed: nothing is reformatted.
 - A blank line typed under a picture becomes two lines holding &nbsp;, however
   many were typed, so pictures are spaced evenly; with none typed there is
@@ -316,7 +317,7 @@ class Exporter:
         attachments = {res.hash: folder.save_attachment(res)
                        for res in note.resources}
         renderer = NoteRenderer(attachments, folder,
-                                self.add_note_link, note.title)
+                                self.add_note_link, note.title, note.tags)
         try:
             body = renderer.render(note.content)
         except Exception as error:  # a converter bug must not lose the note
@@ -535,11 +536,12 @@ class NoteRenderer:
     """Renders one note's ENML body as Markdown."""
 
     def __init__(self, attachments: dict[str, Attachment], folder: NoteFolder, add_note_link,
-                 title: str = ""):
+                 title: str = "", tags: list[str] | None = None):
         self.attachments = attachments
         self.folder = folder
         self.add_note_link = add_note_link
-        self.hints = title_languages(title)
+        # the languages the note's title and tags name, which hint at its code's
+        self.hints = title_languages(" ".join([title, *(tags or [])]))
         # per code block: the language Evernote recorded, or the scores of its guess
         self.languages: list[str | dict[str, int]] = []
         self.used: set[str] = set()
@@ -767,8 +769,9 @@ class NoteRenderer:
 
     def inline_code(self, element: Element) -> str:
         text = re.sub(r"[\r\n]+", " ", raw_text(element).replace("\xa0", " "))
-        if self.code or not text.strip():
-            return text
+        if not text.strip():
+            # spaces or a line break, in a monospaced font
+            return self.children(element)
         ticks = "`" * (longest_run(text, "`") + 1)
         pad = " " if text.startswith("`") or text.endswith("`") else ""
         return f"{ticks}{pad}{text}{pad}{ticks}"
@@ -846,9 +849,14 @@ class NoteRenderer:
 
     def code_lines(self, lines: list[Element]) -> str:
         """Renders monospaced lines pasted from an editor as one code block."""
-        if not any(code_text(line) for line in lines):
+        filled = [index for index, line in enumerate(lines) if code_text(line)]
+        if not filled:
             # empty lines alone are just blank lines
             return "".join(map(self.node, lines))
+        # empty lines before or after the code are blank lines typed around it,
+        # in its font
+        before, after = lines[:filled[0]], lines[filled[-1] + 1:]
+        lines = lines[filled[0]:filled[-1] + 1]
         # an Evernote code block among the lines keeps the language it recorded
         recorded = [recorded_language(style) for style in map(style_of, lines)
                     if "-en-codeblock:true" in style]
@@ -857,7 +865,7 @@ class NoteRenderer:
         with self.in_code():
             text = BARE_MARKER_RUN.sub(
                 code_newlines, LINE.join(map(self.node, lines)))
-        return self.fence(text, language)
+        return "".join(map(self.node, before)) + self.fence(text, language) + "".join(map(self.node, after))
 
     def fence(self, text: str, language: str | None) -> str:
         """Fences a code block; with no language recorded (None), its language is decided later."""
@@ -1245,7 +1253,7 @@ def recorded_language(style: str) -> str | None:
 
 
 def title_languages(title: str) -> tuple[str, ...]:
-    """Returns the languages a note's title names, such as css for "Gradients CSS3"."""
+    """Returns the languages a note's title or tags name, such as css for "Gradients CSS3"."""
     return tuple(language for language, pattern in TITLE_LANGUAGES.items() if pattern.search(title))
 
 

@@ -881,6 +881,12 @@ class TestLanguageFromTags(ExportTest):
              js_clue, ("Develop - Javascript",), "```javascript"),
             ("a tag can't overrule the code", csharp_or_js,
              ("Develop - Javascript",), "```"),
+            ("with no clue in the code, the tag's language", "<pre>System.Environment.MachineName</pre>",
+             ("Develop - ASPX",), "```csharp"),
+            ("but not when the code is something else",
+             "<pre>sails lift</pre>", ("Develop - Javascript",), "```bash"),
+            ("nor when the tags name two languages", "<pre>doSomething(x);</pre>",
+             ("Develop - CSS", "Develop - Javascript"), "```"),
         ]:
             with self.subTest(case):
                 self.setUp()
@@ -919,12 +925,49 @@ class TestLanguageGuess(unittest.TestCase):
             ("JSON", '{\n  "a": 1,\n  "b": [true]\n}', "json"),
             ("braces that aren't JSON", "{\n    console.log(x);\n}", ""),
             ("YAML", "services:\n  db:\n    image: postgres\n    ports:\n      - 5432:5432", "yaml"),
+            ("ASPX directive", '<%@ Reference Control="WebUserControl.ascx" %>', "xml"),
+            ("ASPX data binding", "SelectedValue='<%# Eval(\"id\") %>'", "xml"),
+            ("ASPX controls, with an HTML tag among them",
+             '<asp:Button ID="b" runat="server" />\n<hr />\n<asp:SqlDataSource ID="s" runat="server" />', "xml"),
+            ("config with no closing tag in the snippet",
+             "<configuration>\n  <system.webServer>", "xml"),
+            ("XSLT around an HTML tag",
+             '<div>\n  <xsl:attribute name="class">a</xsl:attribute>\n</div>', "xml"),
+            ("an XML file with comments",
+             '<?xml version="1.0"?>\n<!-- a -->\n<configuration/>', "xml"),
+            ("an HTML template with EJS", "<h1>\n<%- title %>\n</h1>", "html"),
+            ("the end of a page, from a closing tag", "</body>\n</html>", "html"),
+            ("the end of a config, from a closing tag",
+             "</rewrite>\n</system.WebServer>", "xml"),
+            ("HTML attributes",
+             "ng-class=\"{'even': $index % 2 == 0}\"", "html"),
+            ("a terminal session",
+             "Mac:Git me$ mkdir Test\nMac:Git me$ cd Test/\nThe template was created.", "bash"),
+            ("commands of other tools", "sails new myApp\nnuget restore", "bash"),
+            ("a program run by its path",
+             "node_modules/eslint/bin/eslint.js --init", "bash"),
+            ("a JSON fragment",
+             '"JwtAuthentication": {\n  "Key": "x"\n}', "json"),
+            ("a JSON fragment trimmed by hand",
+             '"Logging": {\n  "Level": "Info",\n}', "json"),
+            ("YAML with placeholders",
+             "...\n\nsteps:\n  - task: UseDotNet@2\n    inputs:\n      version: '3.1'\n\n...", "yaml"),
+            ("YAML with expressions",
+             "name: Build\non: push\njobs:\n  build:\n    env:\n      KEY: ${{ secrets.KEY }}", "yaml"),
+            ("a Markdown badge",
+             "[![Nuget](https://img.shields.io/nuget/v/X)](https://www.nuget.org/packages/X)", "markdown"),
             ("too little to tell", "x = y + 1", ""),
             ("plain text", "Hello there, this is a note.", ""),
         ]
         for case, code, expected in cases:
             with self.subTest(case):
                 self.assertEqual(guess_language(code), expected)
+
+    def test_attributes_of_xml(self):
+        """Attributes are HTML's, unless the note's title or tags name XML, as XSLT's are."""
+        self.assertEqual(guess_language('select="//nodeName"'), "html")
+        self.assertEqual(guess_language(
+            'select="//nodeName"', ("xml",)), "xml")
 
     def test_recorded_language(self):
         for style, expected in [("--en-syntaxlanguage:js", "javascript"), ("--en-syntaxlanguage:ruby", "ruby"),

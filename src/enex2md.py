@@ -190,7 +190,9 @@ EVERNOTE_LANGUAGES = {"cs": "csharp",
 STRONG = 2
 SHELL_COMMAND = (r"^\s*(\$\s+)?([A-Z_][A-Z0-9_]*=\S*\s+)*"  # an environment variable may come first
                  r"(sudo|npm|npx|yarn|pnpm|dotnet|git|docker|kubectl|brew|pip3?|curl|"
-                 r"cd|ls|mkdir|export|chmod|apt-get|az|aws|claude|codex|code|node|python3?)\s")
+                 r"cd|ls|mkdir|export|chmod|apt-get|az|aws|claude|codex|code|node|python3?|"
+                 r"sails|nuget|ng|mvn|java|make|cat|echo|rm|cp|mv|touch|grep|"
+                 r"[\w.-]*/[\w./-]+)\s")  # or a program run by its path
 LANGUAGE_PATTERNS = {language: [(re.compile(entry[0], re.M), entry[1]) if isinstance(entry, tuple)
                                 else (re.compile(entry, re.M), 1) for entry in patterns]
                      for language, patterns in {
@@ -220,9 +222,22 @@ LANGUAGE_PATTERNS = {language: [(re.compile(entry[0], re.M), entry[1]) if isinst
     "xml": [], "html": [], "json": [], "yaml": [], "powershell": [r"^\s*\$\w+\s*=", r"\b(Get|Set|New|Remove|Invoke)-[A-Z]\w+"],
 }.items()}
 YAML_LINE = re.compile(r"\s*(-\s+)?[\w.\-\"']+:(\s+\S.*)?$|\s*-\s+\S")
+# A tag (or the end of one), a comment, a declaration or ASP.NET's <% %> that opens markup
+MARKUP_START = re.compile(r"</?(?:%|!|\?|[A-Za-z])")
+ASPNET_BLOCK = re.compile(r"<%.*?%>", re.S)
+XML_ONLY = re.compile(
+    r"<\?xml|<xsl:|<asp:|xmlns(:\w+)?=\"http://www\.w3\.org/1999/XSL")
+HTML_TAG = re.compile(r"<!DOCTYPE html|</?(html|head|body|div|span|p|a|ul|ol|li|table|tr|td|th|form|input|"
+                      r"button|script|style|link|meta|img|br|h[1-6]|label|select|option|textarea|"
+                      r"iframe|nav|header|footer|section)[\s>/]", re.I)
+HTML_ATTRIBUTE = re.compile(r"[\w:.-]+=(\"[^\"]*\"|'[^']*')")
+# A terminal session: a prompt such as "Mac:Git me$ " before the first command
+SHELL_PROMPT = re.compile(r"[\w.@~:/-]+(?: [\w.@-]+)?\$ +\S")
+JSON_MEMBER = re.compile(r"\"[^\"\n]+\"\s*:")
+MARKDOWN_BADGE = re.compile(r"\[!\[[^\]]*\]\([^)]*\)\]\(")
 # Words in a note's title that name a language; each is a hint, worth a point
 TITLE_LANGUAGES = {language: re.compile(pattern, re.I) for language, pattern in {
-    "csharp": r"C#|\.net\b|\bnet core\b|asp\.?net|\blinq\b|entity framework|\bwpf\b|\bwcf\b|"
+    "csharp": r"C#|\.net\b|\bnet core\b|asp\.?net|\baspx\b|\blinq\b|entity framework|\bwpf\b|\bwcf\b|"
               r"\bcastle\b|\bwindsor\b|\bmvc\b|\bxunit\b|\bnunit\b|\bmoq\b",
     "javascript": r"javascript|\bjs\b|jquery|angular|\bnode\b|react|\bes6\b",
     "typescript": r"typescript",
@@ -883,7 +898,7 @@ class NoteRenderer:
     def fill_languages(self, body: str) -> str:
         """Names each guessed block's language, taking the note's usual language when the
         block's own code is too short to tell but fits it."""
-        named = [entry if isinstance(entry, str) else confident_language(entry)
+        named = [entry if isinstance(entry, str) else confident_language(entry, self.hints)
                  for entry in self.languages]
         usual = collections.Counter(
             language for language in named if language).most_common(1)
@@ -1260,26 +1275,18 @@ def title_languages(title: str) -> tuple[str, ...]:
 def language_scores(code: str, hints: tuple[str, ...] = ()) -> dict[str, int]:
     """Scores each language by the patterns of it the code has, and a point if its note names it.
 
-    A tag that opens the code makes it markup outright, since CSS or script
-    inside a page is still the page; valid JSON is JSON.
+    Some code is a kind outright: markup, as CSS or script inside a page is
+    still the page; JSON, even a fragment of an object; a terminal session;
+    YAML; HTML attributes; a Markdown badge.
     """
     scores = dict.fromkeys(LANGUAGE_PATTERNS, 0)
-    stripped = code.strip()
-    if stripped[:1] in "{[":
-        try:
-            json.loads(stripped)
-            return {**scores, "json": 10}
-        except ValueError:
-            pass
-    if stripped.startswith("<") and re.search(r"</[\w:.-]+>|/>", code):
-        markup = "xml" if re.search(
-            r"<\?xml|<xsl:|xmlns(:\w+)?=\"http://www\.w3\.org/1999/XSL", code) else "html"
-        return {**scores, markup: 10}
-    lines = [line for line in stripped.split(
-        "\n") if line.strip() and not line.lstrip().startswith("#")]
-    if len(lines) >= 2 and not re.search(r"[;{}]", code) and all(map(YAML_LINE.match, lines)):
-        # keys and list items only, such as a docker-compose file
-        return {**scores, "yaml": 10}
+    kind = outright_language(code)
+    if kind == "html" and "xml" in hints and HTML_ATTRIBUTE.match(code.strip()):
+        kind = "xml"  # attributes in a note about XML, as XSLT's select="…"
+    if kind:
+        return {**scores, kind: 10}
+    lines = [line for line in code.strip().split("\n")
+             if line.strip() and not line.lstrip().startswith("#")]
     for language, patterns in LANGUAGE_PATTERNS.items():
         scores[language] = sum(
             weight for pattern, weight in patterns if pattern.search(code))
@@ -1291,12 +1298,47 @@ def language_scores(code: str, hints: tuple[str, ...] = ()) -> dict[str, int]:
     return scores
 
 
-def confident_language(scores: dict[str, int]) -> str:
+def outright_language(code: str) -> str:
+    """Names the language of code that shows it outright, or "" when patterns must tell."""
+    stripped = code.strip()
+    lines = [line for line in stripped.split("\n")
+             if line.strip() and not line.lstrip().startswith("#") and line.strip() != "..."]
+    # a fragment of an object is JSON too
+    for text in (stripped, "{" + stripped + "}"):
+        if text[:1] in "{[" and (text == stripped or JSON_MEMBER.match(stripped)):
+            try:
+                json.loads(text)
+                return "json"
+            except ValueError:
+                pass
+    if JSON_MEMBER.match(stripped) and stripped.endswith(("}", "]")):
+        return "json"
+    if MARKUP_START.match(stripped) or ASPNET_BLOCK.search(code):
+        # ASP.NET's own markup is XML; a page with HTML's tags is HTML, EJS too
+        return "xml" if XML_ONLY.search(code) or not HTML_TAG.search(code) else "html"
+    if lines and all(HTML_ATTRIBUTE.fullmatch(line.strip()) for line in lines):
+        return "html"  # attributes of a tag, as Angular's ng-class
+    if SHELL_PROMPT.match(stripped):
+        return "bash"
+    yaml_text = re.sub(r"\$\{\{.*?\}\}", "", code)  # GitHub's expressions
+    if len(lines) >= 2 and not re.search(r"[;{}]", yaml_text) and all(map(YAML_LINE.match, lines)):
+        return "yaml"  # keys and list items only, such as a docker-compose file
+    if MARKDOWN_BADGE.match(stripped):
+        return "markdown"
+    return ""
+
+
+def confident_language(scores: dict[str, int], hints: tuple[str, ...] = ()) -> str:
     """Names the best-scoring language when it has two points and a clear lead, since a
-    wrong language colours code worse than none; otherwise ""."""
+    wrong language colours code worse than none; otherwise ""; and, when the code
+    shows no other language, the one language the note's title and tags name."""
     ranked = sorted(scores.items(), key=lambda item: -item[1])
     (best, top), (_, second) = ranked[0], ranked[1]
-    return best if top >= 2 and top > second else ""
+    if top >= 2 and top > second:
+        return best
+    shown = {language for language,
+             score in scores.items() if score and language not in hints}
+    return hints[0] if len(hints) == 1 and not shown else ""
 
 
 # Command line

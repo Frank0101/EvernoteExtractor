@@ -234,11 +234,33 @@ class TestCommandLine(ExportTest):
 class TestFilesAndDates(ExportTest):
     """File names, duplicates, dates and attachments."""
 
-    def test_file_names(self):
-        for title, expected in [("a/b: c?", "a b c"), ("  .hidden", "hidden"), ("x#y^[z]|", "x y z"), ("", "Untitled"),
-                                ("a" * 120, "a" * 100)]:
+    def test_note_names_keep_the_title(self):
+        for title, expected in [("Operatori ?? e ?", "Operatori ?? e ?"), ("Thinking in C#", "Thinking in C#"),
+                                ('From IEnumerble<Task> to "Task"',
+                                 'From IEnumerble<Task> to "Task"'),
+                                ("Try/Catch", "Try\u2215Catch"), ("Interview: Gigs",
+                                                                  "Interview\ua789 Gigs"),
+                                (".Net Core - Intro", "\u2024Net Core - Intro"), ("  a\tb  ",
+                                                                                  "a b"), ("", "Untitled"),
+                                ("a" * 300, "a" * 240), ("\u00e0" * 200, "\u00e0" * 120)]:
             with self.subTest(title):
-                self.assertEqual(enex2md.safe_name(title), expected)
+                self.assertEqual(enex2md.note_name(title), expected)
+
+    def test_attachment_names(self):
+        for name, expected in [("a/b: c?", "a b c"), ("  .hidden", "hidden"), ("x#y^[z]|", "x y z"), ("", "Untitled"),
+                               ("a" * 120, "a" * 100)]:
+            with self.subTest(name):
+                self.assertEqual(enex2md.safe_name(name), expected)
+
+    def test_link_to_a_note_whose_title_has_special_characters(self):
+        notes = self.export(
+            note_xml("Source", '<div><a href="evernote:///view/1/s1/a/a/">Thinking in C#</a> and '
+                               '<a href="evernote:///view/1/s1/b/b/">Try/Catch?</a></div>'),
+            note_xml("Thinking in C#", "<div>x</div>"), note_xml("Try/Catch?", "<div>y</div>"))
+        self.assertEqual(
+            sorted(notes), ["Source.md", "Thinking in C#.md", "Try\u2215Catch?.md"])
+        self.assertEqual(body_of(notes["Source.md"]),
+                         "[Thinking in C#](Thinking%20in%20C%23.md) and [Try/Catch?](Try\u2215Catch%3F.md)")
 
     def test_duplicate_titles(self):
         notes = self.export(note_xml("Note", "<div>1</div>"),
@@ -286,7 +308,7 @@ class TestFrontMatterAndTags(ExportTest):
 
         def local(stamp): return datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(
             tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S")
-        self.assertEqual(notes["Plan Q1.md"].split("\n---\n")[0], "\n".join([
+        self.assertEqual(notes['Plan\ua789 "Q1".md'].split("\n---\n")[0], "\n".join([
             "---", 'title: "Plan: \\"Q1\\""', f"created: {local('20240115T093000Z')}",
             f"updated: {local('20240116T101500Z')}", "tags:", '  - "Management-Excel"', '  - "work-stuff"',
             '  - "ideas"', '  - "a-b"', 'source: "https://example.com/clip"', 'author: "Someone"',
@@ -304,7 +326,9 @@ class TestFrontMatterAndTags(ExportTest):
 
     def test_tags(self):
         for tag, expected in [("Management - Excel", "Management-Excel"), ("work stuff", "work-stuff"),
-                              ("#ideas", "ideas"), ("a--b", "a-b"), ("Dev/AI", "Dev/AI"), ("C++", "C")]:
+                              ("#ideas", "ideas"), ("a--b",
+                                                    "a-b"), ("Dev/AI", "Dev/AI"), ("C++", "C"),
+                              ("Develop - C#", "Develop-CSharp"), ("Develop - .Net Core", "Develop-Net-Core")]:
             with self.subTest(tag):
                 self.assertEqual(enex2md.obsidian_tag(tag), expected)
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Convert Evernote export files (.enex) into a folder of Markdown notes.
 
-Every note becomes one Markdown file named after its title, with YAML front
+Every note becomes one Markdown file named after its title, as typed but for
+/ and : and a starting dot, which become look-alikes (a Mac can't hold the
+first two in a file name, and the dot would hide the file), with YAML front
 matter (title, created, updated, tags, source, author, location), and the
 file's creation and modification times set to the note's (on macOS; other
 systems keep only the modification time). Attachments are saved
@@ -65,7 +67,7 @@ How the conversion works, and why:
   lines Markdown needs around it, whatever was typed: Obsidian already draws
   it with a blank line's margin above and below, next to a picture too.
 - Tags are made valid Obsidian tags: no spaces or punctuation but - _ and /,
-  so "Work - Ideas" becomes "Work-Ideas".
+  so "Work - Ideas" becomes "Work-Ideas", and "C#" becomes "CSharp".
 - Only the Python standard library is used, so there is nothing to install.
 """
 
@@ -92,10 +94,16 @@ from urllib.parse import quote, unquote_to_bytes
 # Output files
 ATTACHMENTS_DIR = "attachments"
 MAX_NAME_LENGTH = 100
+# A note's file name keeps its title; a Mac can't hold / or : in one, so they
+# become look-alikes, as does a dot that starts it, which would hide the file
+NOTE_NAME_LOOKALIKES = {"/": "\u2215", ":": "\ua789"}
+HIDING_DOT = "\u2024"
+# a Mac takes names of up to 255 bytes, ".md" and " (2)" included
+MAX_NAME_BYTES = 240
 UNSAFE_NAME = re.compile(r'[\\/:*?"<>|#^\[\]\x00-\x1f]')
 TAG_SPECIAL = re.compile(r"[^\w/]*[^\w/-][^\w/]*|-{2,}")
 URL_SPECIAL = re.compile(r"[\s()<>]")
-PATH_SPECIAL = re.compile(r"[\s()<>%]")
+PATH_SPECIAL = re.compile(r"[\s()<>%#?\"]")
 
 # Placeholders a rendered block holds until its content is complete; resolve()
 # turns each run of them into line breaks, paragraph breaks and blank lines:
@@ -368,7 +376,7 @@ class NoteFolder:
         self.attachment_names: set[str] = set()
 
     def note_path(self, title: str) -> str:
-        return os.path.join(self.path, unique_name(safe_name(title), ".md", self.note_names))
+        return os.path.join(self.path, unique_name(note_name(title), ".md", self.note_names))
 
     def save_attachment(self, resource: Resource) -> Attachment:
         """Saves a resource once per folder, however many notes hold it."""
@@ -390,8 +398,18 @@ class NoteFolder:
         return attachment
 
 
+def note_name(title: str) -> str:
+    """Turns a note's title into its file name, as typed but for what a Mac can't hold."""
+    name = re.sub(r"\s+", " ", CONTROL_CHARS.sub(" ", title)).strip()
+    name = "".join(NOTE_NAME_LOOKALIKES.get(char, char) for char in name)
+    if name.startswith("."):
+        name = HIDING_DOT + name[1:]
+    name = name.encode()[:MAX_NAME_BYTES].decode(errors="ignore").rstrip()
+    return name or "Untitled"
+
+
 def safe_name(text: str, default: str = "Untitled") -> str:
-    """Turns a title into a file name that every OS and Obsidian accept."""
+    """Turns a name into one for an attachment or a folder that every OS and Obsidian accept."""
     name = re.sub(r"\s+", " ", UNSAFE_NAME.sub(" ", text)).strip().lstrip(".")
     name = name[:MAX_NAME_LENGTH].rstrip(" .")
     return name or default
@@ -471,7 +489,9 @@ def yaml_string(value: str) -> str:
 
 
 def obsidian_tag(tag: str) -> str:
-    return TAG_SPECIAL.sub("-", tag.strip().lstrip("#")).strip("-")
+    """Makes a tag valid in Obsidian; a # after a letter is spelled out, so C# is CSharp."""
+    tag = re.sub(r"(?<=\w)#", "Sharp", tag.strip().lstrip("#"))
+    return TAG_SPECIAL.sub("-", tag).strip("-")
 
 
 class Element:

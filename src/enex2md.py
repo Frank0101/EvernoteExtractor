@@ -37,8 +37,8 @@ How the conversion works, and why:
   holding only &nbsp;, as the last line of the paragraph above it: a bare
   blank line in Markdown only separates paragraphs, so the new section starts
   after a line's space and a paragraph's, a gap bigger than between lines.
-  Between two lines of text, and under a picture, it becomes two such lines,
-  since Obsidian's gap between paragraphs is nearly a line already.
+  After a line of text, whatever follows, and under a picture, it becomes two
+  such lines, since Obsidian's gap between paragraphs is nearly a line already.
 - Links between notes carry Evernote IDs that the export doesn't map to notes,
   so they are matched by their text to a note's title once every note is
   written; a link that matches no note keeps its evernote:// address.
@@ -118,6 +118,7 @@ LIST_ITEM = re.compile(r"[ \t]*(?:[-*+]|\d+[.)]) ")
 # A line of a block that a next line would join: a list item, a quote, a table
 # row, or an indented line of one of them
 BLOCK_LINE = re.compile(r"[ \t]|(?:[-*+]|\d+[.)]) |>|\|")
+CODE_FENCE = re.compile(r"`{3,}|~{3,}")
 LIST_PREFIX = re.compile(r"(?:[-*+]|\d+\.) (?:\[[ x]\] )?")
 IMAGE_LINE_END = re.compile(r"!\[[^\]]*\]\([^()\s]*\)(?:</span>)*$")
 PDF_LINE_END = re.compile(r"!\[[^\]]*\]\([^()\s]*\.pdf\)(?:</span>)*$", re.I)
@@ -1108,12 +1109,23 @@ def newlines(match: re.Match, paragraphs: bool = False) -> str:
                 paragraphs or text.startswith("![", match.end()))):
             return "\n\n"
         return "\n" if before_block else HARD_BREAK
+    # the line above, without the spaces a line of Evernote's text may start
+    # with, which the newlines replace; a line of a list already written keeps them
+    line = text[line_start:match.start()]
+    if line_start and text[line_start - 1] in MARKERS:
+        line = line.lstrip(" \t")
+    after_block = BLOCK_LINE.match(line)
     if before_block and after_image:
         # under a picture before a block, an extra blank line in the picture's
         # section gives the gap after a list
         return (HARD_BREAK + BLANK_LINE) * (blank + 1) + "\n\n"
+    if paragraphs and not after_pdf and not after_block and not CODE_FENCE.match(line):
+        # after a line of text or a picture, whatever follows, each typed blank
+        # line is two, for the new section to stand out, as Obsidian's gap
+        # between paragraphs is nearly a line already
+        blank *= 2
     if before_block:
-        if not BLOCK_LINE.match(text, line_start):
+        if not after_block:
             # after a line of text the blank lines are its next lines, so they
             # show as typed, not with a paragraph's spacing around each
             return (HARD_BREAK + BLANK_LINE) * blank + "\n\n"
@@ -1122,12 +1134,7 @@ def newlines(match: re.Match, paragraphs: bool = False) -> str:
         return "\n\n" + (BLANK_LINE + HARD_BREAK) * blank
     if paragraphs:
         # the blank lines end the paragraph above, so a new section starts
-        # after their space and a paragraph's; Obsidian's gap between
-        # paragraphs is nearly a line already, so after text or a picture each
-        # is two, for the new section to stand out, but one between text and a
-        # picture below it
-        if not after_pdf and (after_image or not text.startswith("![", match.end())):
-            blank *= 2
+        # after their space and a paragraph's
         return (HARD_BREAK + BLANK_LINE) * blank + "\n\n"
     return HARD_BREAK + (BLANK_LINE + HARD_BREAK) * blank
 

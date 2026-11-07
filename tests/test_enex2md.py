@@ -390,12 +390,12 @@ class TestLinesAndBlankLines(ExportTest):
     def test_lines_and_blank_lines(self):
         self.check_bodies([
             ("each line is a paragraph", "<div>a</div><div>b</div>", "a\n\nb"),
-            ("typed blank line, a section of its own",
-             "<div>a</div><div><br/></div><div>b</div>", "a\n\n&nbsp;\n\nb"),
+            ("typed blank line between text, two lines ending the paragraph above",
+             "<div>a</div><div><br/></div><div>b</div>", "a\n&nbsp;\n&nbsp;\n\nb"),
             ("blank line in nested spans", "<div>a</div><div><span><span><br/></span></span></div><div>b</div>",
-             "a\n\n&nbsp;\n\nb"),
+             "a\n&nbsp;\n&nbsp;\n\nb"),
             ("two line breaks inside a line",
-             "<div>a<br/><br/>b</div>", "a\n\n&nbsp;\n\nb"),
+             "<div>a<br/><br/>b</div>", "a\n&nbsp;\n&nbsp;\n\nb"),
             ("a <br> ending a line draws nothing",
              "<div>a<br/></div><div>b</div>", "a\n\nb"),
             ("a <br> ending a line before spaces draws nothing",
@@ -403,13 +403,13 @@ class TestLinesAndBlankLines(ExportTest):
             ("no backslash line breaks",
              "<div>a</div><div>b</div><div>c</div>", "a\n\nb\n\nc"),
             ("blank line after a list",
-             "<ul><li>x</li></ul><div><br/></div><div>b</div>", "- x\n\n&nbsp;\n\nb"),
-            ("blank line between text and a list",
-             "<div>a</div><div><br/></div><ul><li>x</li></ul>", "a\n\n&nbsp;\n\n- x"),
+             "<ul><li>x</li></ul><div><br/></div><div>b</div>", "- x\n\n&nbsp;\nb"),
+            ("blank line between text and a list stays one line",
+             "<div>a</div><div><br/></div><ul><li>x</li></ul>", "a\n&nbsp;\n\n- x"),
             ("two blank lines between text and a list",
-             "<div>a</div><div><br/></div><div><br/></div><ul><li>x</li></ul>", "a\n\n&nbsp;\n\n&nbsp;\n\n- x"),
-            ("blank line between text and an attachment",
-             f"<div>a</div><div><br/></div>{media(XLSX)}", f"a\n\n&nbsp;\n\n{XLSX_BLOCK}"),
+             "<div>a</div><div><br/></div><div><br/></div><ul><li>x</li></ul>", "a\n&nbsp;\n&nbsp;\n\n- x"),
+            ("blank line between text and an attachment stays one line",
+             f"<div>a</div><div><br/></div>{media(XLSX)}", f"a\n&nbsp;\n\n{XLSX_BLOCK}"),
             ("blank line between a list and an attachment is a paragraph of its own",
              f"<ul><li>x</li></ul><div><br/></div>{media(XLSX)}", f"- x\n\n&nbsp;\n\n{XLSX_BLOCK}"),
             ("blank line between a quote and a list is a paragraph of its own",
@@ -426,7 +426,7 @@ class TestLinesAndBlankLines(ExportTest):
             ("a closing tag with no opening one is ignored",
              "<div>a</b>b</div>", "ab"),
             ("two typed blank lines",
-             "<div>a</div><div><br/></div><div><br/></div><div>b</div>", "a\n\n&nbsp;\n\n&nbsp;\n\nb"),
+             "<div>a</div><div><br/></div><div><br/></div><div>b</div>", "a\n&nbsp;\n&nbsp;\n&nbsp;\n&nbsp;\n\nb"),
             ("a line break within a line stays a line break",
              "<div>a<br/>b</div>", "a\nb"),
             ("the lines of a list item stay lines",
@@ -463,13 +463,13 @@ class TestIndentation(ExportTest):
         self.check_bodies([
             ("indented lines end with a blank line",
              f"<div>Task</div><div {INDENT}>x</div><div {INDENT}>y</div><div>Action</div>",
-             "Task\n\nx\n\ny\n\n&nbsp;\n\nAction"),
+             "Task\n\nx\n\ny\n&nbsp;\n&nbsp;\n\nAction"),
             ("a typed blank line isn't doubled",
-             f"<div>Task</div><div {INDENT}>x</div><div><br/></div><div>Next</div>", "Task\n\nx\n\n&nbsp;\n\nNext"),
+             f"<div>Task</div><div {INDENT}>x</div><div><br/></div><div>Next</div>", "Task\n\nx\n&nbsp;\n&nbsp;\n\nNext"),
             ("deeper indent stays in the same run",
-             f'<div {INDENT}>x</div><div style="padding-left:80px;">y</div><div>z</div>', "x\n\ny\n\n&nbsp;\n\nz"),
+             f'<div {INDENT}>x</div><div style="padding-left:80px;">y</div><div>z</div>', "x\n\ny\n&nbsp;\n&nbsp;\n\nz"),
             ("old Evernote indent isn't a quote", f"<blockquote {OLD_INDENT}><div>x</div></blockquote><div>y</div>",
-             "x\n\n&nbsp;\n\ny"),
+             "x\n&nbsp;\n&nbsp;\n\ny"),
             ("a real quote", "<blockquote><div>q1</div><div>q2</div></blockquote>", "> q1\n> q2"),
             ("an empty quote is dropped",
              "<div>a</div><blockquote> </blockquote>", "a"),
@@ -515,6 +515,29 @@ class TestFormatting(ExportTest):
              "==a== ==b=="),
             ("marks typed in code stay", "<div>x <code>a**b</code></div><pre>a====b\n~~~~</pre>",
              "x `a**b`\n\n```\na====b\n~~~~\n```"),
+        ])
+
+    def test_text_that_looks_like_markdown_at_the_start_of_a_line(self):
+        """A line typed as text but starting like a list, heading or quote stays text."""
+        self.check_bodies([
+            ("numbers typed by hand aren't a list",
+             "<div>1) a</div><div>2. b</div>", "1\\) a\n\n2\\. b"),
+            ("nor bullets, headings or quotes",
+             "<div>- a</div><div>+ b</div><div># c</div><div>&gt; d</div>", "\\- a\n\n\\+ b\n\n\\# c\n\n\\> d"),
+            ("spacing as text, not as a list",
+             "<div>t</div><div><br/></div><div>1) a</div><div><br/></div><div>2) b</div>",
+             "t\n&nbsp;\n&nbsp;\n\n1\\) a\n&nbsp;\n&nbsp;\n\n2\\) b"),
+            ("after a line break", "<div>a<br/>1) b</div>", "a\n1\\) b"),
+            ("a line of a list item",
+             "<ul><li><div>a</div><div>1) b</div></li></ul>", "- a\n  1\\) b"),
+            ("in a quote", "<blockquote><div>1) a</div></blockquote>", "> 1\\) a"),
+            ("not in the middle of a line",
+             "<div>x 1) a - b # c</div>", "x 1) a - b # c"),
+            ("not as a list item's text", "<ul><li>1) a</li></ul>", "- 1) a"),
+            ("not after a to-do box",
+             "<div><en-todo/>1) a</div>", "- [ ] 1) a"),
+            ("not in coloured text",
+             f'<div><span style="color:{RED};">1) a</span></div>', f"{RED_SPAN}1) a</span>"),
         ])
 
     def test_links(self):
@@ -619,24 +642,47 @@ class TestPictures(ExportTest):
     """A picture gets exactly one blank line under it; PDFs show inline, other files are blocks."""
 
     def test_blank_line_under_pictures(self):
+        """A typed blank line under a picture is two; with none typed there is none,
+        just the gap between paragraphs."""
         image, image2 = "![](attachments/one.png)", "![](attachments/two.png)"
         self.check_bodies([
-            ("no blank line typed",
-             f"<div>a</div>{media(PNG)}<div>b</div>", f"a\n\n{image}\n\n&nbsp;\n\nb"),
-            ("two blank lines typed", f"<div>{media(PNG)}</div><div><br/></div><div><br/></div><div>b</div>",
-             f"{image}\n\n&nbsp;\n\nb"),
-            ("side by side pictures each get a line", f"{media(PNG)}{media(PNG2)}<div>b</div>",
-             f"{image}\n\n&nbsp;\n\n{image2}\n\n&nbsp;\n\nb"),
-            ("before a list, the blank line is a paragraph of its own, spaced like one after a list",
-             f"{media(PNG)}<ul><li>x</li></ul>", f"{image}\n\n&nbsp;\n\n- x"),
+            ("no blank line typed, none added",
+             f"<div>a</div>{media(PNG)}<div>b</div>", f"a\n\n{image}\n\nb"),
+            ("a typed blank line is two", f"<div>{media(PNG)}</div><div><br/></div><div>b</div>",
+             f"{image}\n&nbsp;\n&nbsp;\n\nb"),
+            ("two typed blank lines are two as well",
+             f"<div>{media(PNG)}</div><div><br/></div><div><br/></div><div>b</div>", f"{image}\n&nbsp;\n&nbsp;\n\nb"),
+            ("pictures one after the other, with no blank line typed between them",
+             f"{media(PNG)}{media(PNG2)}<div>b</div>", f"{image}\n\n{image2}\n\nb"),
+            ("before a list, with no blank line typed",
+             f"{media(PNG)}<ul><li>x</li></ul>", f"{image}\n\n- x"),
+            ("before a list, with a typed blank line, two lines end the picture's section",
+             f"{media(PNG)}<div><br/></div><ul><li>x</li></ul>", f"{image}\n&nbsp;\n&nbsp;\n\n- x"),
             ("before an attachment", f"{media(PNG)}<div><br/></div>{media(XLSX)}",
-             f"{image}\n\n&nbsp;\n\n{XLSX_BLOCK}"),
+             f"{image}\n&nbsp;\n&nbsp;\n\n{XLSX_BLOCK}"),
             ("inside a list item, the usual gap above it, as Evernote draws it on a line of its own",
              f"<ul><li><div>a</div>{media(PNG)}</li><li>b</li></ul>",
-             f"- a\n\n  {image}\n  &nbsp;\n- b"),
+             f"- a\n\n  {image}\n- b"),
+            ("inside a list item, a typed blank line under it is a line of the item",
+             f"<ul><li><div>a</div>{media(PNG)}<div><br/></div><div>c</div></li></ul>",
+             f"- a\n\n  {image}\n  &nbsp;\n  c"),
             ("on the same line as text in a list item, it stays there",
              f"<ul><li><div>a {media(PNG)}</div></li></ul>", f"- a {image}"),
+            ("after a typed blank line under text, one line, as before a list",
+             f"<div>a</div><div><br/></div>{media(PNG)}", f"a\n&nbsp;\n\n{image}"),
             ("last in the note", f"<div>a</div>{media(PNG)}", f"a\n\n{image}"),
+        ])
+
+    def test_blank_line_under_pdfs(self):
+        """A PDF isn't a picture: a typed blank line under it is one line."""
+        pdf = "![](attachments/Report.pdf)"
+        self.check_bodies([
+            ("a typed blank line",
+             f"{media(PDF)}<div><br/></div><div>b</div>", f"{pdf}\n&nbsp;\n\nb"),
+            ("no blank line typed",
+             f"{media(PDF)}<div>b</div>", f"{pdf}\n\nb"),
+            ("before a list",
+             f"{media(PDF)}<div><br/></div><ul><li>x</li></ul>", f"{pdf}\n&nbsp;\n\n- x"),
         ])
 
     def test_attachment_embeds(self):
@@ -647,7 +693,7 @@ class TestPictures(ExportTest):
              f"{XLSX_BLOCK}"),
             ("a file and its picture each get a line",
              f"<div>a</div>{media(XLSX)}{media(PNG)}<div>b</div>",
-             f"a\n\n{XLSX_BLOCK}\n\n![](attachments/one.png)\n\n&nbsp;\n\nb"),
+             f"a\n\n{XLSX_BLOCK}\n\n![](attachments/one.png)\n\nb"),
             ("a file in a sentence gets its own block", f"<div>see {media(XLSX)} here</div>",
              f"see\n\n{XLSX_BLOCK}\n\nhere"),
             ("a file in a table cell stays a link, since a block would break the table",
@@ -657,11 +703,13 @@ class TestPictures(ExportTest):
 
     def test_attachment_not_shown_in_the_text_is_added_at_the_end(self):
         for case, content, expected in [("after the text", "<div>a</div>", f"a\n\n{XLSX_BLOCK}"),
+                                        ("after a picture, with no blank line, as none was typed",
+                                         media(PNG), f"![](attachments/one.png)\n\n{XLSX_BLOCK}"),
                                         ("in an empty note", "", XLSX_BLOCK)]:
             with self.subTest(case):
                 self.setUp()
-                self.assertEqual(
-                    self.body(content, resources=(XLSX,)), expected)
+                shown = (PNG, XLSX) if media(PNG) in content else (XLSX,)
+                self.assertEqual(self.body(content, resources=shown), expected)
 
     def test_pictures_from_the_web(self):
         self.check_bodies([

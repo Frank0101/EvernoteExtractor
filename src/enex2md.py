@@ -33,10 +33,12 @@ How the conversion works, and why:
   lines of a list item, quote or table cell, are a bare newline, which
   Obsidian shows as typed; most other previews (VS Code, GitHub) join such
   lines, and would need HARD_BREAK set to Markdown's backslash break.
-- A blank line typed in Evernote, which marks a new section, becomes a
-  paragraph holding only &nbsp;, between the sections it parts: a bare blank
-  line in Markdown only separates paragraphs, so it couldn't show the bigger
-  gap of a new section.
+- A blank line typed in Evernote, which marks a new section, becomes a line
+  holding only &nbsp;, as the last line of the paragraph above it: a bare
+  blank line in Markdown only separates paragraphs, so the new section starts
+  after a line's space and a paragraph's, a gap bigger than between lines.
+  Between two lines of text, and under a picture, it becomes two such lines,
+  since Obsidian's gap between paragraphs is nearly a line already.
 - Links between notes carry Evernote IDs that the export doesn't map to notes,
   so they are matched by their text to a note's title once every note is
   written; a link that matches no note keeps its evernote:// address.
@@ -57,8 +59,9 @@ How the conversion works, and why:
   is guessed from patterns in the code, the languages the note's title names
   and the language of the note's other code blocks, and left unset when unsure.
 - Code is kept as typed: nothing is reformatted.
-- A picture always has exactly one blank line under it, however many were
-  typed, so pictures are spaced evenly. A divider gets only the bare blank
+- A blank line typed under a picture becomes two lines holding &nbsp;, however
+  many were typed, so pictures are spaced evenly; with none typed there is
+  none. A PDF, which Obsidian shows in a viewer of its own, is spaced as text. A divider gets only the bare blank
   lines Markdown needs around it, whatever was typed: Obsidian already draws
   it with a blank line's margin above and below, next to a picture too.
 - Tags are made valid Obsidian tags: no spaces or punctuation but - _ and /,
@@ -112,8 +115,12 @@ NOTE_LINK = re.compile(r"\x06(\d+)\x06")
 # the end of a block, would show as a literal backslash.
 BLOCK_START = re.compile(r"(?:[-*+] |\d+[.)] |#|>|\||```|~~~|---)")
 LIST_ITEM = re.compile(r"[ \t]*(?:[-*+]|\d+[.)]) ")
+# A line of a block that a next line would join: a list item, a quote, a table
+# row, or an indented line of one of them
+BLOCK_LINE = re.compile(r"[ \t]|(?:[-*+]|\d+[.)]) |>|\|")
 LIST_PREFIX = re.compile(r"(?:[-*+]|\d+\.) (?:\[[ x]\] )?")
 IMAGE_LINE_END = re.compile(r"!\[[^\]]*\]\([^()\s]*\)(?:</span>)*$")
+PDF_LINE_END = re.compile(r"!\[[^\]]*\]\([^()\s]*\.pdf\)(?:</span>)*$", re.I)
 ADJACENT_IMAGES = re.compile(r"(!\[[^\]]*\]\([^()\s]*\))[ \t]*(?=!\[)")
 DIVIDER = "---"
 DIVIDER_START = re.compile(r"---(?:[\x01-\x05]|$)")
@@ -121,6 +128,13 @@ HARD_BREAK = "\n"
 BLANK_LINE = "&nbsp;"
 MARKDOWN_SPECIAL = re.compile(r"([\\`*\[\]<]|(?<!\w)_|_(?!\w))")
 CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+# Text that would start a list, a heading or a quote if a line began with it,
+# such as "1) " typed by hand, holds LINE_START_MARK where a backslash would
+# keep it text; once the note is complete, the mark becomes that backslash
+# where it is at the start of a line, in a quote too, and is dropped elsewhere
+LINE_START_MARK = "\x10"
+LOOKS_LIKE_BLOCK = re.compile(r"^( *(?:\d+(?=[.)] )|(?=[-+] )|(?=[#>])))")
+MARKED_LINE_START = re.compile(r"^((?:[ \t]*>)*[ \t]*\d*)\x10", re.M)
 TOUCHING_CODE = re.compile(r"(?<!`)`[^`\n]+`(?:`[^`\n]+`)+(?!`)")
 CODE_INDENT = "    "
 # A formatting mark, such as ** for bold, is held as a token until the note is
@@ -524,10 +538,10 @@ class NoteRenderer:
                   if key not in self.used]
         for attachment in unused:
             if body:
-                body += f"\n{BLANK_LINE}\n" if IMAGE_LINE_END.search(
-                    body) else "\n\n"
+                body += "\n\n"
             body += resolve(self.embed(attachment))
-        body = join_touching_code(write_marks(self.fill_languages(body)))
+        body = join_touching_code(write_marks(
+            escape_line_starts(self.fill_languages(body))))
         return "\n".join(line.rstrip() for line in body.split("\n"))
 
     # Blocks and their children
@@ -679,7 +693,7 @@ class NoteRenderer:
         value = CONTROL_CHARS.sub("", value).replace("\xa0", " ")
         if self.code:
             return value.replace("\r", "").replace("\n", "")
-        return escape(re.sub(r"\s+", " ", value))
+        return LOOKS_LIKE_BLOCK.sub(r"\1" + LINE_START_MARK, escape(re.sub(r"\s+", " ", value)), count=1)
 
     def colored(self, text: str) -> str:
         """Shows each line of text in the current colour, keeping list markers outside."""
@@ -726,7 +740,8 @@ class NoteRenderer:
         if href.lower().startswith("evernote:"):
             title = re.sub(r"\s+", " ", raw_text(element)).strip()
             # the link is written once every note is, so its label's marks are now
-            return lead + self.add_note_link(write_marks(core), title, href) + trail
+            label = write_marks(core.replace(LINE_START_MARK, ""))
+            return lead + self.add_note_link(label, title, href) + trail
         return f"{lead}[{core}]({link_target(href)}){trail}"
 
     def inline_code(self, element: Element) -> str:
@@ -905,11 +920,6 @@ class NoteRenderer:
             self.list_depth -= 1
         if not items:
             return ""
-        # a picture ending an item gets its blank line inside the item; after
-        # the last item, the list's own end gives it
-        for index in range(len(items) - 1):
-            if IMAGE_LINE_END.search(items[index]):
-                items[index] += "\n" + " " * widths[index] + BLANK_LINE
         separator = LINE if self.list_depth else PARA
         return separator + "\n".join(items) + separator
 
@@ -1083,8 +1093,12 @@ def newlines(match: re.Match, paragraphs: bool = False) -> str:
         # Obsidian draws a divider with a blank line's margin around it, so the
         # bare blank line Markdown needs there is all the space it gets
         return "\n\n"
-    if IMAGE_LINE_END.search(text, line_start, match.start()):
-        blank = 1  # always one blank line under a picture, however many were typed
+    # a PDF, which Obsidian shows in a viewer of its own, is spaced as text is
+    after_pdf = PDF_LINE_END.search(text, line_start, match.start())
+    after_image = not after_pdf and IMAGE_LINE_END.search(
+        text, line_start, match.start())
+    if after_image and blank:
+        blank = 1  # one blank line under a picture, however many were typed
     # a line after a list item, such as a to-do line, would join the item
     after_item = LIST_ITEM.match(text, line_start)
     if not blank:
@@ -1094,11 +1108,27 @@ def newlines(match: re.Match, paragraphs: bool = False) -> str:
                 paragraphs or text.startswith("![", match.end()))):
             return "\n\n"
         return "\n" if before_block else HARD_BREAK
-    if before_block or paragraphs:
-        # each blank line is a paragraph of its own between the sections it parts
+    if before_block and after_image:
+        # under a picture before a block, an extra blank line in the picture's
+        # section gives the gap after a list
+        return (HARD_BREAK + BLANK_LINE) * (blank + 1) + "\n\n"
+    if before_block:
+        if not BLOCK_LINE.match(text, line_start):
+            # after a line of text the blank lines are its next lines, so they
+            # show as typed, not with a paragraph's spacing around each
+            return (HARD_BREAK + BLANK_LINE) * blank + "\n\n"
         return "\n\n" + (BLANK_LINE + "\n\n") * blank
     if block_gap or after_item:
         return "\n\n" + (BLANK_LINE + HARD_BREAK) * blank
+    if paragraphs:
+        # the blank lines end the paragraph above, so a new section starts
+        # after their space and a paragraph's; Obsidian's gap between
+        # paragraphs is nearly a line already, so after text or a picture each
+        # is two, for the new section to stand out, but one between text and a
+        # picture below it
+        if not after_pdf and (after_image or not text.startswith("![", match.end())):
+            blank *= 2
+        return (HARD_BREAK + BLANK_LINE) * blank + "\n\n"
     return HARD_BREAK + (BLANK_LINE + HARD_BREAK) * blank
 
 
@@ -1146,6 +1176,12 @@ def join_touching_code(text: str) -> str:
     """Joins pieces of inline code that touch, as pieces from different nesting levels can:
     `a``b` would read as one broken piece."""
     return TOUCHING_CODE.sub(lambda match: "`" + match.group(0)[1:-1].replace("``", "") + "`", text)
+
+
+def escape_line_starts(text: str) -> str:
+    """Keeps text that starts a line but looks like a list, heading or quote as text,
+    with a backslash: 1\\) as typed is not a numbered list."""
+    return MARKED_LINE_START.sub(r"\1\\", text).replace(LINE_START_MARK, "")
 
 
 def write_marks(text: str) -> str:

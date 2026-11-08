@@ -538,7 +538,16 @@ class TestFormatting(ExportTest):
             ("old highlight", '<span style="background-color:rgb(255, 250, 165);-evernote-highlight:true;">h</span>',
              "==h=="),
             ("bold, highlight and colour together",
-             f'<span style="color:{RED};font-weight:bold;--en-highlight:yellow;">x</span>', f"{RED_SPAN}**==x==**</span>"),
+             f'<span style="color:{RED};font-weight:bold;--en-highlight:yellow;">x</span>',
+             f"{RED_SPAN}**=={RED_SPAN}x</span>==**</span>"),
+            ("a highlight in coloured text keeps the colour, which Obsidian would draw it without",
+             f'<div><font color="{RED}"><u><span style="--en-highlight:yellow;">S:</span> Single</u></font></div>',
+             f"{RED_SPAN}<u>=={RED_SPAN}S:</span>== Single</u></span>"),
+            ("an italic sentence runs through coloured, partly highlighted text",
+             f'<div><i>a </i><i><span style="color:{RED};"><span style="--en-highlight:yellow;">b</span></span></i><i> c</i></div>',
+             f"*a =={RED_SPAN}b</span>== c*"),
+            ("coloured text highlighted in full has the highlight around the colour",
+             f'<div><span style="color:{RED};--en-highlight:yellow;">x</span></div>', f"=={RED_SPAN}x</span>=="),
             ("nested bold isn't doubled", "<b>a <b>b</b></b>", "**a b**"),
             ("heading", "<h2>Title <i>two</i></h2>", "## Title *two*"),
             ("escaping", "<div>5 * 3 [x] &lt;tag&gt; a_b _c_ \\</div>",
@@ -563,6 +572,10 @@ class TestFormatting(ExportTest):
              '==a <span style="color: rgb(227,0,0)">b</span>.=='),
             ("touching underlines join into one",
              "<div><u>a</u><u>b</u></div>", "<u>ab</u>"),
+            ("bold coloured text with nothing to join stays inside its colour",
+             f'<div>a <span style="color: {RED};"><b>b</b></span> c</div>', f"a {RED_SPAN}**b**</span> c"),
+            ("even next to an underline it would join",
+             f'<div><u>a</u><span style="color: {RED};"><u>b</u></span></div>', f"<u>a</u>{RED_SPAN}<u>b</u></span>"),
             ("an underline goes inside the colour, to be drawn in it",
              f'<div><u><span style="color: {RED};">a</span></u> <span style="color: {RED};"><u>b</u></span></div>',
              f"{RED_SPAN}<u>a</u></span> {RED_SPAN}<u>b</u></span>"),
@@ -810,7 +823,7 @@ class TestCode(ExportTest):
             ("an empty pre is dropped", "<div>a</div><pre>  </pre>", "a"),
             ("page parts that aren't text are dropped from code",
              f"<pre>a<style>p {{ }}</style>b</pre><div><font {CONSOLAS}>c<script>d</script></font></div>",
-             "```\nab\n```\n\n```\nc\n```"),
+             "```\nab\nc\n```"),
             ("pasted lines in a monospaced font",
              f'<div>Before</div><div><font {CONSOLAS}><font color="#0000FF">int</font> x = 1;</font></div>'
              f"<div><font {CONSOLAS}><br/></font></div><div><font {CONSOLAS}>&nbsp;&nbsp;&nbsp; y();</font></div>"
@@ -860,11 +873,11 @@ class TestCode(ExportTest):
              code("<br/>\nb = 2;"),
              "```\na = 1;\n```\n\n```\nb = 2;\n```"),
             ("in two different fonts: two pieces",
-             code("a = 1;") + blank + code("b = 2;", courier), "```\na = 1;\n```\n&nbsp;\n\n```\nb = 2;\n```"),
+             code("a = 1;") + blank + code("b = 2;", courier), "```\na = 1;\n```\n\n```\nb = 2;\n```"),
             ("in two clearly different languages: two pieces",
              code("SELECT name FROM users\nWHERE id = 1") + blank +
              code("function load(x) {\n    console.log(x);\n}"),
-             "```sql\nSELECT name FROM users\nWHERE id = 1\n```\n&nbsp;\n\n```javascript\nfunction load(x) {\n    console.log(x);\n}\n```"),
+             "```sql\nSELECT name FROM users\nWHERE id = 1\n```\n\n```javascript\nfunction load(x) {\n    console.log(x);\n}\n```"),
             ("one piece too short to tell its language is joined to the other",
              code("import { A } from './a';") + blank +
              code("function load(x) {\n    console.log(x);\n}"),
@@ -919,6 +932,9 @@ class TestCode(ExportTest):
              block(
                  "<p>\n    <!--\n        a\n          b\n        -->\n    <!-- one line -->\n</p>"),
              "html\n<p>\n    <!--\n    a\n      b\n    -->\n    <!-- one line -->\n</p>"),
+            ("however deep its --> already is",
+             block('<?xml version="1.0"?>\n<!--\n  a\n    b\n-->\n<c/>'),
+             'xml\n<?xml version="1.0"?>\n<!--\na\n  b\n-->\n<c/>'),
             ("<head> and <body> may sit as deep as <html>",
              block("<html>\n<head>\n<title>a</title>\n</head>\n</html>"),
              "html\n<html>\n<head>\n    <title>a</title>\n</head>\n</html>"),
@@ -956,6 +972,40 @@ class TestCode(ExportTest):
              "- call `a()` first"),
         ])
 
+    def test_page_and_its_script(self):
+        """A run of code lines is parted at an empty line between a page's markup and its
+        script; a Razor view's C# and HTML, or C# and a LINQ query, stay one piece."""
+        def code(text):
+            return "".join(f"<div><font {CONSOLAS}>{html.escape(line) or '<br/>'}</font></div>" for line in text.split("\n"))
+        self.check_bodies([
+            ("markup, then its script",
+             code('<div ng-app="app">\n    <p>{{title}}</p>\n</div>\n\nangular.module("app").controller("c", function ($scope) {\n'
+                  '    $scope.title = "a";\n});'),
+             '```html\n<div ng-app="app">\n    <p>{{title}}</p>\n</div>\n```\n\n```javascript\n'
+             'angular.module("app").controller("c", function ($scope) {\n    $scope.title = "a";\n});\n```'),
+            ("pieces in two fonts, with an empty line in the code font between",
+             f'<div><font {CONSOLAS}>a = 1;</font></div><div><font {CONSOLAS}><br/></font></div>'
+             '<div><font face="Courier New">b = 2;</font></div>', "```\na = 1;\n```\n\n```\nb = 2;\n```"),
+            ("a Razor view", code("@model Shop.Models.Product\n\n<!DOCTYPE html>\n<html>\n<body>\n    <p>@Model.Name</p>\n</body>\n</html>"),
+             "```\n@model Shop.Models.Product\n\n<!DOCTYPE html>\n<html>\n<body>\n    <p>@Model.Name</p>\n</body>\n</html>\n```"),
+        ])
+
+    def test_list_of_sections(self):
+        """When an item of a list spans several lines or holds code, every item is a section:
+        two empty lines below each, before the next, one below code."""
+        self.check_bodies([
+            ("an item over several lines spaces them all",
+             "<ul><li>S: one<br/>what it means</li><li>O: two</li><li>L: three<br/>more</li></ul>",
+             "- S: one\n  what it means\n  &nbsp;\n  &nbsp;\n- O: two\n  &nbsp;\n  &nbsp;\n- L: three\n  more"),
+            ("an item holding code spaces them all",
+             f"<ul><li>Not done</li><li><font {CONSOLAS}>due &lt;= now()</font></li><li>Not sent</li></ul>",
+             "- Not done\n  &nbsp;\n  &nbsp;\n- ```\n  due <= now()\n  ```\n  &nbsp;\n- Not sent"),
+            ("a list of one-line items stays tight",
+             "<ul><li>a</li><li>b</li></ul>", "- a\n- b"),
+            ("a sub-list doesn't make an item a section", "<ul><li>a<ul><li>x</li><li>y</li></ul></li><li>b</li></ul>",
+             "- a\n  - x\n  - y\n- b"),
+        ])
+
     def test_code_wrapped_in_plain_lines(self):
         """Lines that only wrap other lines don't keep pieces of code apart."""
         self.check_bodies([
@@ -967,6 +1017,12 @@ class TestCode(ExportTest):
              f"<div><div><div><font {CONSOLAS}>x {{</font></div></div></div>"
              f"<blockquote><div><font {CONSOLAS}>y();</font></div></blockquote><div><font {CONSOLAS}>}}</font></div>",
              "```\nx {\n    y();\n}\n```"),
+            ("preformatted pieces are pieces of code too, an empty one showing nothing, and one holding only ... stands apart",
+             f"<pre {CONSOLAS}>a = [\n    1\n];\n</pre><pre {CONSOLAS}>...\n</pre><pre {CONSOLAS}></pre>"
+             f"<div><font {CONSOLAS}>b = 2;</font></div>",
+             "```\na = [\n    1\n];\n\n...\n\nb = 2;\n```"),
+            ("a ... among the lines of a piece is left as it is",
+             f"<pre {CONSOLAS}>f();\n...\ng();</pre>", "```\nf();\n...\ng();\n```"),
             ("an empty preformatted line is a blank line between pieces",
              f"<div><font {CONSOLAS}>a = 1;</font></div><pre {CONSOLAS}><span><br/></span></pre><pre {CONSOLAS}></pre>"
              f"<div><font {CONSOLAS}>b = 2;</font></div>",
@@ -1031,7 +1087,7 @@ class TestLanguageContext(ExportTest):
             ("the title names the language",
              "CSS3 tricks", weak_css, ["```css"]),
             ("alone, too short to tell", "Notes", weak_js, ["```"]),
-            ("the note's other code blocks are JavaScript", "Notes", strong_js + weak_js,
+            ("the note's other code blocks are JavaScript", "Notes", strong_js + "<div>text</div>" + weak_js,
              ["```javascript", "```javascript"]),
             ("the other block's recorded language isn't one guessed", "Notes",
              '<div style="-en-codeblock:true;--en-syntaxLanguage:ruby"><div>puts 1</div></div>'
@@ -1076,6 +1132,9 @@ class TestLanguageFromTags(ExportTest):
              js_clue, ("Develop - Javascript",), "```javascript"),
             ("a tag can't overrule the code", csharp_or_js,
              ("Develop - Javascript",), "```"),
+            ("else { isn't a CSS selector, nor a // comment a command",
+             "<pre>//Position is an object\nf = function (p) {\n    if (p) {\n        go();\n    }\n    else {\n        stop();\n    }\n};</pre>",
+             ("Develop - CSS", "Develop - Javascript"), "```javascript"),
             ("LINQ's .Where( isn't SQL", "<pre>items.Where(x => x.On).ToList();</pre>",
              ("Develop - C#",), "```csharp"),
             ("with no clue in the code, the tag's language", "<pre>System.Environment.MachineName</pre>",

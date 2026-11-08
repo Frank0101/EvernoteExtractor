@@ -139,6 +139,8 @@ LIST_ITEM = re.compile(r"[ \t]*(?:[-*+]|\d+[.)]) ")
 BLOCK_LINE = re.compile(r"[ \t]|(?:[-*+]|\d+[.)]) |>|\|")
 CODE_FENCE = re.compile(r"`{3,}|~{3,}")
 CODE_FENCE_LINE = re.compile(r"^`{3,}", re.M)
+NESTED_ITEM = re.compile(r"\s*([-*+]|\d+\.) ")
+TRAILING_BLANK_LINES = re.compile(r"(\n[ \t]*(&nbsp;)?)+$")
 LIST_PREFIX = re.compile(r"(?:[-*+]|\d+\.) (?:\[[ x]\] )?")
 IMAGE_LINE_END = re.compile(r"!\[[^\]]*\]\([^()\s]*\)(?:</span>)*$")
 PDF_LINE_END = re.compile(r"!\[[^\]]*\]\([^()\s]*\.pdf\)(?:</span>)*$", re.I)
@@ -163,6 +165,11 @@ CODE_INDENT = "    "
 # would read as bold. An opening token is the mark between MARK_OPEN, a closing
 # one between MARK_CLOSE.
 MARK_OPEN, MARK_CLOSE = "\x0e", "\x0f"
+HIGHLIGHT_OPEN, HIGHLIGHT_CLOSE = MARK_OPEN + \
+    "==" + MARK_OPEN, MARK_CLOSE + "==" + MARK_CLOSE
+# a colour span right inside one of the same colour, as joining highlights may leave
+DOUBLE_SPAN = re.compile(
+    r"(<span[^>]*>)\1((?:(?!</?span\b)[\s\S])*?)</span></span>")
 # Evernote's highlight colour as a plain background, as some notes store a highlight
 HIGHLIGHT_YELLOW = re.compile(
     r"background(-color)?:(rgb\(255,250,165\)|#fffaa5)")
@@ -176,10 +183,12 @@ TOUCHING_MARKS = re.compile(r"\x0f([^\x0e\x0f]+)\x0f(\x1f*)\x0e\1\x0e")
 # a colour span holding a marked piece in full, as a red word in a highlighted sentence
 # an underline holding a coloured piece in full: a browser draws the line in the
 # underline's own colour, so the colour goes outside it, as Evernote shows it
+# text in a span, which may hold spans of its own, as a highlight's colour
+SPAN_TEXT = r"(?:(?!</?span\b)[\s\S]|<span[^>]*>(?:(?!</?span\b)[\s\S])*?</span>)*?"
 UNDERLINED_SPAN = re.compile(
-    r"\x0e<u>\x0e(<span[^>]*>)((?:(?!</?span\b)[\s\S])*?)</span>\x0f<u>\x0f")
+    r"\x0e<u>\x0e(<span[^>]*>)(" + SPAN_TEXT + r")</span>\x0f<u>\x0f")
 SPAN_MARKED = re.compile(
-    r"(<span[^>]*>)\x0e([^\x0e\x0f]+)\x0e((?:(?!</?span\b)[\s\S])*?)\x0f\2\x0f</span>")
+    r"(<span[^>]*>)\x0e([^\x0e\x0f]+)\x0e(" + SPAN_TEXT + r")\x0f\2\x0f</span>")
 
 # HTML
 VOID_TAGS = {"br", "hr", "img", "en-media", "en-todo", "input", "meta", "link",
@@ -218,7 +227,8 @@ SHELL_COMMAND = (r"^\s*(\$\s+)?([A-Z_][A-Z0-9_]*=\S*\s+)*"  # an environment var
                  r"(sudo|npm|npx|yarn|pnpm|dotnet|git|docker|kubectl|brew|pip3?|curl|"
                  r"cd|ls|mkdir|export|chmod|apt-get|az|aws|claude|codex|code|node|python3?|"
                  r"sails|nuget|ng|mvn|java|make|cat|echo|rm|cp|mv|touch|grep|"
-                 r"[\w.-]*/[\w./-]+)\s")  # or a program run by its path
+                 # or a program run by its path, not a // comment
+                 r"[\w.-]*/(?!/)[\w./-]+)\s")
 LANGUAGE_PATTERNS = {language: [(re.compile(entry[0], re.M), entry[1]) if isinstance(entry, tuple)
                                 else (re.compile(entry, re.M), 1) for entry in patterns]
                      for language, patterns in {
@@ -238,7 +248,8 @@ LANGUAGE_PATTERNS = {language: [(re.compile(entry[0], re.M), entry[1]) if isinst
                    r"\bmodule\.exports\b|\bexport\s+(default\s+)?(function|const|class)\b"],
     "typescript": [r"\binterface\s+\w+\s*\{", r"\w+\s*:\s*(string|number|boolean|any|void)\b",
                    r"^\s*import\s+.*\s+from\s+['\"]", r"@(Component|Injectable|NgModule)\("],
-    "css": [r"^\s*[.#]?[\w-]+([\s>+~.#:][\w-]+)*\s*\{\s*$", r"^\s*[\w-]+\s*:\s*[^;{}]+;\s*$",
+    # a selector, not a keyword opening a block, as else {
+    "css": [r"^(?!\s*(else|try|finally|do)\s*\{)\s*[.#]?[\w-]+([\s>+~.#:][\w-]+)*\s*\{\s*$", r"^\s*[\w-]+\s*:\s*[^;{}]+;\s*$",
             r"@media\b|!important\b", r"\b\d+(px|em|rem|%)\b"],
     "sql": [r"\bSELECT\b[\s\S]+\b(?i:from)\b", r"\b(INSERT\s+INTO|DELETE\s+FROM|CREATE\s+TABLE|ALTER\s+TABLE)\b",
             # after a dot, a method of the same name, as LINQ's .Where(
@@ -668,16 +679,53 @@ class NoteRenderer:
                     # blank lines typed around the divider go with it
                     while run and not code_text(run[-1]):
                         run.pop()
-                    parts.append(self.code_lines(run))
+                    parts.append(self.code_pieces(run))
                     run = following[next(index for index, line in enumerate(
                         following) if code_text(line)):]
                 elif self.one_piece(run, following):
                     run = run + gap + following
                 else:
-                    break
+                    # two blocks, with a bare blank line between them
+                    parts.append(self.code_pieces(run))
+                    run = following
                 index = end
-            parts.append(self.code_lines(run))
+            parts.append(self.code_pieces(run))
         return "".join(parts)
+
+    def code_pieces(self, run: list[Element]) -> str:
+        """Renders a run of code lines, parting it at its empty lines where the pieces on
+        either side differ in font, or are markup and script, as an HTML page and the
+        script after it; a Razor view's C# and HTML, or C# and its LINQ query, are one."""
+        filled = [index for index, line in enumerate(run) if code_text(line)]
+        if not filled:
+            return self.code_lines(run)
+        piece = run[:filled[0] + 1]
+        parts: list[str] = []
+        for previous, index in zip(filled, filled[1:]):
+            gap, following = run[previous + 1:index], [run[index]]
+            if gap and self.page_and_script(piece, self.rest_of_piece(run, index, filled)):
+                # code blocks one after the other have a bare blank line between them
+                parts.append(self.code_lines(piece))
+                piece = following
+            else:
+                piece = piece + gap + following
+        return "".join(parts) + self.code_lines(piece + run[filled[-1] + 1:])
+
+    def page_and_script(self, piece: list[Element], following: list[Element]) -> bool:
+        """Tells whether two pieces of code differ in font, or are markup and the script or
+        style that goes with it, one after the other."""
+        if code_fonts(piece) != code_fonts(following):
+            return True
+        kinds = {confident_language(language_scores(self.code_of(lines), self.hints), self.hints)
+                 for lines in (piece, following)}
+        return len(kinds) == 2 and bool(kinds & MARKUP_LANGUAGES) and bool(kinds & {"javascript", "typescript", "css"})
+
+    @staticmethod
+    def rest_of_piece(run: list[Element], index: int, filled: list[int]) -> list[Element]:
+        """Returns the lines of code from index to the next empty line."""
+        end = next((previous + 1 for previous, line in zip(filled, filled[1:])
+                    if previous >= index and line > previous + 1), filled[-1] + 1)
+        return run[index:end]
 
     def one_piece(self, run: list[Element], following: list[Element]) -> bool:
         """Tells whether two runs of code lines are in the same font and, as far as can be
@@ -822,6 +870,15 @@ class NoteRenderer:
             # were coloured as it rendered
             if not body or "\n" in body or (body.startswith(opening) and body.endswith("</span>")):
                 continue
+            # Obsidian draws a highlight in the normal text colour, so the colour goes
+            # inside it: around all of a highlighted piece, inside each highlight of one
+            # highlighted in part
+            inner = body[len(HIGHLIGHT_OPEN):-len(HIGHLIGHT_CLOSE)]
+            if body.startswith(HIGHLIGHT_OPEN) and body.endswith(HIGHLIGHT_CLOSE) and HIGHLIGHT_OPEN not in inner:
+                parts[index] = f"{lead}{prefix}{HIGHLIGHT_OPEN}{opening}{inner}</span>{HIGHLIGHT_CLOSE}{trail}"
+                continue
+            body = body.replace(HIGHLIGHT_OPEN, HIGHLIGHT_OPEN + opening).replace(
+                HIGHLIGHT_CLOSE, "</span>" + HIGHLIGHT_CLOSE)
             parts[index] = f"{lead}{prefix}{opening}{body}</span>{trail}"
         return "".join(parts)
 
@@ -956,8 +1013,21 @@ class NoteRenderer:
 
     def code_of(self, lines: list[Element]) -> str:
         """Returns the text of lines of code, as typed."""
+        lines = [line for line in lines if line.tag != "pre" or raw_text(line)]
+        parts: list[str] = []
         with self.in_code():
-            return BARE_MARKER_RUN.sub(code_newlines, LINE.join(map(self.node, lines)))
+            for index, line in enumerate(lines):
+                # an empty line of a <pre> is a blank line, which a bare line break would lose
+                text = (pre_text(line)
+                        or BREAK) if line.tag == "pre" else self.node(line)
+                # a <pre> holding only ..., code left out between pieces, stands apart
+                omitted = line.tag == "pre" and text.strip() in ("...", "…")
+                if omitted and parts:
+                    parts.append(BREAK)
+                parts.append(text)
+                if omitted and index < len(lines) - 1:
+                    parts.append(BREAK)
+            return BARE_MARKER_RUN.sub(code_newlines, LINE.join(parts))
 
     def fence(self, text: str, language: str | None) -> str:
         """Fences a code block; with no language recorded (None), its language is decided later."""
@@ -1012,8 +1082,8 @@ class NoteRenderer:
         number = int(start) if start.isdigit() else 1
         items: list[str] = []
         widths: list[int] = []
-        # the items empty lines go below, and how many
-        spaced: dict[int, int] = {}
+        # whether an item is a section of its own: it holds code, or spans several lines
+        sections: list[bool] = []
         self.list_depth += 1
         try:
             for child in element.children:
@@ -1045,9 +1115,8 @@ class NoteRenderer:
                     continue
                 if CODE_FENCE_LINE.search(body):
                     body = spaced_code(body)
-                    # two below text, as after a paragraph; one below code, which ends a block
-                    spaced[len(items)] = 1 if CODE_FENCE_LINE.match(
-                        body.rsplit("\n", 1)[-1]) else 2
+                sections.append(bool(CODE_FENCE_LINE.search(body))
+                                or len(item_lines(body)) > 1)
                 items.append(f"{marker} " + indent(body,
                              len(bullet) + 1, first=False))
                 widths.append(len(bullet) + 1)
@@ -1056,9 +1125,14 @@ class NoteRenderer:
             self.list_depth -= 1
         if not items:
             return ""
-        # an item holding code has empty lines below it, before the next item
-        for index, count in spaced.items():
-            if index < len(items) - 1:
+        # when an item is a section of its own, every item of the list is, for the list
+        # to read evenly: empty lines below each, before the next, two below text, as
+        # after a paragraph, one below code, which ends a block
+        if any(sections):
+            for index in range(len(items) - 1):
+                items[index] = TRAILING_BLANK_LINES.sub("", items[index])
+                count = 1 if CODE_FENCE_LINE.match(
+                    items[index].rsplit("\n", 1)[-1].lstrip()) else 2
                 items[index] += ("\n" + " " * widths[index] + "&nbsp;") * count
         separator = LINE if self.list_depth else PARA
         return separator + "\n".join(items) + separator
@@ -1249,6 +1323,18 @@ def split_at_breaks(kids: list[Element | str]) -> list[list[Element | str]]:
     return lines
 
 
+def item_lines(body: str) -> list[str]:
+    """Returns the lines of text a list item's own text spans, up to a list nested in it;
+    a picture or an attached file, spaced by rules of its own, isn't one."""
+    lines = []
+    for line in body.split("\n"):
+        if NESTED_ITEM.match(line):
+            break
+        if line.strip() and line.strip() != BLANK_LINE and not line.lstrip().startswith(("![", "> [!")):
+            lines.append(line)
+    return lines
+
+
 def spaced_code(body: str) -> str:
     """Sets one empty line between the code blocks of a list item and its text, in place
     of the blank lines around them, and none at its end, where the list sets it."""
@@ -1375,6 +1461,9 @@ def holds_code(element: Element) -> bool:
 
 def is_code_line(element: Element) -> bool:
     """Tells whether a block holds only monospaced text: a line of pasted code, or an empty one."""
+    if element.tag == "pre":
+        # code as typed; an empty one shows nothing
+        return bool(raw_text(element))
     if element.tag not in BLOCK_TAGS and element.tag != "p" and not is_indent(element):
         return False
     if element.tag in ("li", "td", "th", "tr", "thead", "tbody", "tfoot", "dl", "en-note"):
@@ -1463,6 +1552,13 @@ def raw_text(element: Element) -> str:
         elif child.tag not in SKIPPED_TAGS:
             parts.append(raw_text(child))
     return "".join(parts)
+
+
+def pre_text(element: Element) -> str:
+    """Returns the text of a <pre> as typed, without the line break it may end with, which
+    a browser doesn't show."""
+    text = raw_text(element).replace("\xa0", " ").replace("\r", "")
+    return text[:-1] if text.endswith("\n") else text
 
 
 def table_rows(table: Element):
@@ -1656,10 +1752,14 @@ def aligned_comments(lines: list[str], language: str) -> list[str]:
             break
         margin = line[:len(line) - len(line.lstrip())]
         inside = lines[index + 1:end + 1]
-        depth = min((indent_width(piece)
-                    for piece in inside if piece.strip()), default=0)
-        result[index + 1:end + 1] = [margin + " " * (indent_width(piece) - depth) + piece.lstrip() if piece.strip() else piece
-                                     for piece in inside]
+        # the text's own indent, wherever a --> on a line of its own sits
+        text = [piece for piece in inside if piece.strip()
+                and piece.strip() != "-->"]
+        depth = min(map(indent_width, text), default=0)
+        result[index + 1:end + 1] = [
+            margin + "-->" if piece.strip() == "-->"
+            else margin + " " * (indent_width(piece) - depth) + piece.lstrip() if piece.strip() else piece
+            for piece in inside]
         index = end + 1
     return result
 
@@ -1806,6 +1906,7 @@ def write_marks(text: str) -> str:
         text = SPAN_MARKED.sub(
             lambda match: mark_around_span(match, text), text)
         text, joined = TOUCHING_MARKS.subn(r"\2", text)
+    text = DOUBLE_SPAN.sub(r"\1\2</span>", text)
     return MARK_TOKEN.sub(lambda match: closing_mark(match.group(2))
                           if match.group(1) == MARK_CLOSE else match.group(2), text).replace(MARKED_SPACE, " ")
 

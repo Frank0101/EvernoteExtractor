@@ -53,7 +53,7 @@ PNG2 = resource(b"fake png two", "image/png", "two.png")
 PDF = resource(b"%PDF-1.4 fake", "application/pdf", "Report.pdf")
 XLSX = resource(b"fake sheet", "application/vnd.ms-excel", "data.xlsx")
 RESOURCES = (PNG, PNG2, PDF, XLSX)
-XLSX_BLOCK = "> [!attachment] [data.xlsx](attachments/data.xlsx)"
+XLSX_BLOCK = "> [!attachment] [data.xlsx](_attachments/data.xlsx)"
 
 
 def note_xml(title: str, content: str, created: str | None = "20240115T093000Z",
@@ -285,7 +285,7 @@ class TestFilesAndDates(ExportTest):
         self.export(note_xml("A", media(same) + media(unnamed), resources=(same, unnamed)),
                     note_xml("B", media(same) + media(clash), resources=(same, clash)))
         files = sorted(os.listdir(os.path.join(
-            self.dir, "Notebook", "attachments")))
+            self.dir, "Notebook", "_attachments")))
         self.assertEqual(
             files, [short_hash(b"no name") + ".png", "shared (2).png", "shared.png"])
 
@@ -295,7 +295,7 @@ class TestFilesAndDates(ExportTest):
             "<resource><data></data><mime>image/png</mime></resource>")))
         self.assertEqual(body_of(notes["N.md"]), "x")
         self.assertFalse(os.path.exists(
-            os.path.join(self.dir, "Notebook", "attachments")))
+            os.path.join(self.dir, "Notebook", "_attachments")))
 
 
 class TestFrontMatterAndTags(ExportTest):
@@ -499,7 +499,7 @@ class TestDividers(ExportTest):
             ("two dividers", "<div>a</div><hr/><div><br/></div><hr/><div>b</div>",
              "a\n\n---\n\n---\n\nb"),
             ("after a picture", f"{media(PNG)}<div><br/></div><hr/><div>b</div>",
-             "![](attachments/one.png)\n\n---\n\nb"),
+             "![](_attachments/one.png)\n\n---\n\nb"),
         ])
 
 
@@ -716,7 +716,7 @@ class TestPictures(ExportTest):
     def test_blank_line_under_pictures(self):
         """A typed blank line under a picture is two; with none typed there is none,
         just the gap between paragraphs."""
-        image, image2 = "![](attachments/one.png)", "![](attachments/two.png)"
+        image, image2 = "![](_attachments/one.png)", "![](_attachments/two.png)"
         self.check_bodies([
             ("no blank line typed, none added",
              f"<div>a</div>{media(PNG)}<div>b</div>", f"a\n\n{image}\n\nb"),
@@ -749,7 +749,7 @@ class TestPictures(ExportTest):
 
     def test_blank_line_under_pdfs(self):
         """A PDF isn't a picture: a typed blank line under it is one line."""
-        pdf = "![](attachments/Report.pdf)"
+        pdf = "![](_attachments/Report.pdf)"
         self.check_bodies([
             ("a typed blank line",
              f"{media(PDF)}<div><br/></div><div>b</div>", f"{pdf}\n&nbsp;\n\nb"),
@@ -761,24 +761,24 @@ class TestPictures(ExportTest):
 
     def test_attachment_embeds(self):
         self.check_bodies([
-            ("picture", media(PNG), "![](attachments/one.png)"),
-            ("PDF shown inline", media(PDF), "![](attachments/Report.pdf)"),
+            ("picture", media(PNG), "![](_attachments/one.png)"),
+            ("PDF shown inline", media(PDF), "![](_attachments/Report.pdf)"),
             ("other file is a block, as Evernote shows it", media(XLSX),
              f"{XLSX_BLOCK}"),
             ("a file and its picture each get a line",
              f"<div>a</div>{media(XLSX)}{media(PNG)}<div>b</div>",
-             f"a\n\n{XLSX_BLOCK}\n\n![](attachments/one.png)\n\nb"),
+             f"a\n\n{XLSX_BLOCK}\n\n![](_attachments/one.png)\n\nb"),
             ("a file in a sentence gets its own block", f"<div>see {media(XLSX)} here</div>",
              f"see\n\n{XLSX_BLOCK}\n\nhere"),
             ("a file in a table cell stays a link, since a block would break the table",
              f"<table><tr><td>a</td><td>{media(XLSX)}</td></tr></table>",
-             "| a | [data.xlsx](attachments/data.xlsx) |\n| --- | --- |"),
+             "| a | [data.xlsx](_attachments/data.xlsx) |\n| --- | --- |"),
         ])
 
     def test_attachment_not_shown_in_the_text_is_added_at_the_end(self):
         for case, content, expected in [("after the text", "<div>a</div>", f"a\n\n{XLSX_BLOCK}"),
                                         ("after a picture, with no blank line, as none was typed",
-                                         media(PNG), f"![](attachments/one.png)\n\n{XLSX_BLOCK}"),
+                                         media(PNG), f"![](_attachments/one.png)\n\n{XLSX_BLOCK}"),
                                         ("in an empty note", "", XLSX_BLOCK)]:
             with self.subTest(case):
                 self.setUp()
@@ -796,9 +796,9 @@ class TestPictures(ExportTest):
         png = base64.b64encode(b"inline image").decode()
         self.check_bodies([
             ("base64", f'<div><img src="data:image/png;base64,{png}"/></div>',
-             f"![](attachments/{short_hash(b'inline image')}.png)"),
+             f"![](_attachments/{short_hash(b'inline image')}.png)"),
             ("percent-encoded", '<div><img src="data:image/svg+xml,%3Csvg%2F%3E"/></div>',
-             f"![](attachments/{short_hash(b'<svg/>')}.svg)"),
+             f"![](_attachments/{short_hash(b'<svg/>')}.svg)"),
             ("unreadable data is dropped",
              '<div>a<img src="data:image/png;base64,abc"/></div>', "a"),
             ("no data is dropped", '<div>a<img src="data:image/png;base64,"/></div>', "a"),
@@ -1210,6 +1210,10 @@ class TestLanguageGuess(unittest.TestCase):
              "...\n\nsteps:\n  - task: UseDotNet@2\n    inputs:\n      version: '3.1'\n\n...", "yaml"),
             ("YAML with expressions",
              "name: Build\non: push\njobs:\n  build:\n    env:\n      KEY: ${{ secrets.KEY }}", "yaml"),
+            ("YAML with a value over several lines, when nothing else fits",
+             "trigger:\n- master\nsteps:\n- script: >\n    dotnet publish\n    --output $(dir)\n  displayName: 'build'", "yaml"),
+            ("but only the lines under it",
+             "steps:\n- script: >\n    dotnet publish\nthen deploy it by hand", ""),
             ("a Markdown badge",
              "[![Nuget](https://img.shields.io/nuget/v/X)](https://www.nuget.org/packages/X)", "markdown"),
             ("too little to tell", "x = y + 1", ""),

@@ -53,7 +53,7 @@ attachments it wrote, plus any warnings.
 MyNotebook/
   Meeting notes.md
   Recipes.md
-  attachments/
+  _attachments/
     photo.jpg
     invoice.pdf
 ```
@@ -65,7 +65,7 @@ MyNotebook/
   Obsidian tags, so `Work - Ideas` becomes `Work-Ideas`.
 - **File dates** set to the note's: on macOS both the creation and
   modification dates, elsewhere the modification date.
-- **Attachments** saved once each in `attachments/`. Pictures and PDFs are
+- **Attachments** saved once each in `_attachments/`. Pictures and PDFs are
   shown in the note; other files are a box with their name, as in Evernote
   (an Obsidian callout), or a plain link inside a table.
 - **Links between notes** become relative links to the note's file. A link to

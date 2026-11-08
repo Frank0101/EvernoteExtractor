@@ -7,7 +7,7 @@ first two in a file name, and the dot would hide the file), with YAML front
 matter (title, created, updated, tags, source, author, location), and the
 file's creation and modification times set to the note's (on macOS; other
 systems keep only the modification time). Attachments are saved
-once each, in an attachments/ folder beside the notes, and linked with relative
+once each, in an _attachments/ folder beside the notes, and linked with relative
 paths: pictures and PDFs are shown in the note, as Obsidian can, and other
 files are a box with their link, as Evernote shows them (an Obsidian
 callout); links from one note to another become relative links to its file. The
@@ -94,7 +94,7 @@ from html.parser import HTMLParser
 from urllib.parse import quote, unquote_to_bytes
 
 # Output files
-ATTACHMENTS_DIR = "attachments"
+ATTACHMENTS_DIR = "_attachments"  # first in a folder, and plain to see
 MAX_NAME_LENGTH = 100
 # A note's file name keeps its title; a Mac can't hold / or : in one, so they
 # become look-alikes, as does a dot that starts it, which would hide the file
@@ -1980,7 +1980,33 @@ def language_scores(code: str, hints: tuple[str, ...] = ()) -> dict[str, int]:
         if language in MARKUP_LANGUAGES and not has_markup(code):
             continue
         scores[language] += 1
+    if not confident_language(scores, hints) and is_yaml(code, folded=True):
+        # a value over several lines makes YAML look like something else: only when
+        # nothing else fits
+        return {**dict.fromkeys(LANGUAGE_PATTERNS, 0), "yaml": 10}
     return scores
+
+
+def is_yaml(code: str, folded: bool = False) -> bool:
+    """Tells whether code is YAML, keys and list items only, as a docker-compose file;
+    folded, the lines under a key ending in > or |, its value over several lines, count."""
+    lines = [line for line in code.strip().split("\n")
+             if line.strip() and not line.lstrip().startswith("#") and line.strip() != "..."]
+    yaml_text = re.sub(r"\$\{\{.*?\}\}", "", code)  # GitHub's expressions
+    if len(lines) < 2 or re.search(r"[;{}]", yaml_text):
+        return False
+    value_depth = None  # the indent of the key whose value runs over the lines below it
+    for line in lines:
+        depth = len(line) - len(line.lstrip())
+        if value_depth is not None and depth > value_depth:
+            continue
+        value_depth = None
+        if not YAML_LINE.match(line):
+            return False
+        if folded and re.search(r":\s*[>|][+-]?\s*$", line):
+            value_depth = len(line) - len(line.lstrip(" -")
+                                          )  # where the key starts
+    return True
 
 
 def has_markup(code: str) -> bool:
@@ -2012,8 +2038,7 @@ def outright_language(code: str) -> str:
         return "html"  # attributes of a tag, as Angular's ng-class
     if SHELL_PROMPT.match(stripped):
         return "bash"
-    yaml_text = re.sub(r"\$\{\{.*?\}\}", "", code)  # GitHub's expressions
-    if len(lines) >= 2 and not re.search(r"[;{}]", yaml_text) and all(map(YAML_LINE.match, lines)):
+    if is_yaml(code):
         return "yaml"  # keys and list items only, such as a docker-compose file
     if MARKDOWN_BADGE.match(stripped):
         return "markdown"

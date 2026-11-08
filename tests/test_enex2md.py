@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
+import html
 import io
 import os
 import sys
@@ -464,6 +465,21 @@ class TestLinesAndBlankLines(ExportTest):
              "<ul><li><div>a</div><div>b</div></li></ul>", "- a\n  b"),
             ("a typed blank line in a list item stays a line of it",
              "<ul><li><div>a</div><div><br/></div><div>b</div></li></ul>", "- a\n  &nbsp;\n  b"),
+            ("a <br> before a new line draws nothing",
+             "a<br/><div>b</div>", "a\n\nb"),
+            ("nor one ending a line inside formatting",
+             "<div><span>a<br/></span></div><div><span><br/></span></div><div>b</div>", "a\n&nbsp;\n&nbsp;\n\nb"),
+            ("nor one inside formatting before a new line",
+             "<div><u>a<br/></u><div><br/></div><div>b</div></div>", "<u>a</u>\n&nbsp;\n&nbsp;\n\nb"),
+            ("but one on a line of its own, between two blocks, is a blank line",
+             "<ul><li>q</li></ul><span><br/></span><div>b</div>", "- q\n\n&nbsp;\nb"),
+            ("nor one followed by a space inside formatting",
+             "<div><span>a<br/> </span></div><div><br/></div><div>b</div>", "a\n&nbsp;\n&nbsp;\n\nb"),
+            ("two before a new line draw one blank line",
+             "a<br/><br/><div>b</div>", "a\n&nbsp;\n&nbsp;\n\nb"),
+            ("lines holding only a link sit tight, as a list does",
+             '<a href="http://a">a</a><div><a href="http://b">b</a></div><div><b><a href="http://c">c</a></b></div>'
+             '<div>text</div>', "[a](http://a)\n[b](http://b)\n**[c](http://c)**\n\ntext"),
             ("a line break written as in HTML, with no slash",
              "<div>a<br>b</div>", "a\nb"),
         ])
@@ -502,6 +518,8 @@ class TestIndentation(ExportTest):
             ("old Evernote indent isn't a quote", f"<blockquote {OLD_INDENT}><div>x</div></blockquote><div>y</div>",
              "x\n&nbsp;\n&nbsp;\n\ny"),
             ("a real quote", "<blockquote><div>q1</div><div>q2</div></blockquote>", "> q1\n> q2"),
+            ("a quote holding code is an indent, as older Evernote drew one",
+             f"<blockquote><div>q</div><div><font {CONSOLAS}>x();</font></div></blockquote>", "q\n\n```\nx();\n```"),
             ("an empty quote is dropped",
              "<div>a</div><blockquote> </blockquote>", "a"),
         ])
@@ -536,11 +554,21 @@ class TestFormatting(ExportTest):
              "<div><b>a</b><b>b</b> <s>c</s><s>d</s></div>", "**ab** ~~cd~~"),
             ("touching italics join into one, rather than reading as bold",
              "<div><i>a</i><i>b</i></div>", "*ab*"),
-            ("an italic sentence split around a highlight",
+            ("an italic sentence split around a highlight is one, with the space it holds",
              '<div><i>a </i><i><span style="--en-highlight:yellow;">b</span></i><i>. c</i></div>',
-             "*a* *==b==. c*"),
+             "*a ==b==. c*"),
+            ("a highlighted sentence with a word in another colour is one highlight",
+             '<div><span style="--en-highlight:yellow;">a </span>'
+             '<span style="--en-highlight:yellow;color:rgb(227, 0, 0);">b</span><span style="--en-highlight:yellow;">.</span></div>',
+             '==a <span style="color: rgb(227,0,0)">b</span>.=='),
             ("touching underlines join into one",
              "<div><u>a</u><u>b</u></div>", "<u>ab</u>"),
+            ("an underline goes inside the colour, to be drawn in it",
+             f'<div><u><span style="color: {RED};">a</span></u> <span style="color: {RED};"><u>b</u></span></div>',
+             f"{RED_SPAN}<u>a</u></span> {RED_SPAN}<u>b</u></span>"),
+            ("Evernote's highlight yellow as a plain background is a highlight",
+             '<div><span style="background-color: rgb(255, 250, 165);">a</span> '
+             '<span style="background-color: white;">b</span></div>', "==a== b"),
             ("highlights with a space between them stay apart",
              '<div><span style="--en-highlight:yellow;">a</span> <span style="--en-highlight:yellow;">b</span></div>',
              "==a== ==b=="),
@@ -702,6 +730,8 @@ class TestPictures(ExportTest):
             ("after a typed blank line under text, two lines, as before anything",
              f"<div>a</div><div><br/></div>{media(PNG)}", f"a\n&nbsp;\n&nbsp;\n\n{image}"),
             ("last in the note", f"<div>a</div>{media(PNG)}", f"a\n\n{image}"),
+            ("a <br> between two pictures, before a new line, draws nothing",
+             f"{media(PNG)}<br/><div>{media(PNG2)}<br/></div>", f"{image}\n\n{image2}"),
         ])
 
     def test_blank_line_under_pdfs(self):
@@ -813,14 +843,162 @@ class TestCode(ExportTest):
              "<pre>a ``` b</pre>", "````\na ``` b\n````"),
         ])
 
+    def test_pieces_of_code_one_after_the_other(self):
+        """Code pasted as lines in a monospaced font, before Evernote had code blocks: pieces
+        with only blank lines between them are one piece, a divider between them parts them."""
+        def code(text, font=CONSOLAS):
+            return "".join(f"<div><font {font}>{line}</font></div>" for line in text.split("\n"))
+        blank, divider = "<div><br/></div>", "<div><br/></div><div><hr/></div><div><br/></div>"
+        courier = 'face="Courier New"'
+        self.check_bodies([
+            ("only blank lines between them: one piece, with the blank line",
+             code("a = 1;") + blank + code("b = 2;"), "```\na = 1;\n\nb = 2;\n```"),
+            ("a divider between them: two pieces, and no divider",
+             code("a = 1;") + divider + code("b = 2;"), "```\na = 1;\n```\n\n```\nb = 2;\n```"),
+            ("a divider between blank lines in the code font: two pieces, nothing between",
+             code("a = 1;\n<br/>") + "<div><hr/></div>" +
+             code("<br/>\nb = 2;"),
+             "```\na = 1;\n```\n\n```\nb = 2;\n```"),
+            ("in two different fonts: two pieces",
+             code("a = 1;") + blank + code("b = 2;", courier), "```\na = 1;\n```\n&nbsp;\n\n```\nb = 2;\n```"),
+            ("in two clearly different languages: two pieces",
+             code("SELECT name FROM users\nWHERE id = 1") + blank +
+             code("function load(x) {\n    console.log(x);\n}"),
+             "```sql\nSELECT name FROM users\nWHERE id = 1\n```\n&nbsp;\n\n```javascript\nfunction load(x) {\n    console.log(x);\n}\n```"),
+            ("one piece too short to tell its language is joined to the other",
+             code("import { A } from './a';") + blank +
+             code("function load(x) {\n    console.log(x);\n}"),
+             "```javascript\nimport { A } from './a';\n\nfunction load(x) {\n    console.log(x);\n}\n```"),
+            ("with whitespace between the lines, as Evernote writes it",
+             f"<div><font {CONSOLAS}>a = 1;</font> </div>\n" + blank + "\n" + code("b = 2;"), "```\na = 1;\n\nb = 2;\n```"),
+            ("a blank line in the code's font between text is a blank line",
+             f"<div>a</div><div><font {CONSOLAS}><br/></font></div><div>b</div>", "a\n&nbsp;\n&nbsp;\n\nb"),
+            ("text after a blank line ends the piece", code("a = 1;") + blank + "<div>text</div>",
+             "```\na = 1;\n```\n\n&nbsp;\ntext"),
+        ])
+
+    def test_code_that_lost_its_indent(self):
+        """Lines of code nested in a block but no deeper than the line that opens it get one
+        level deeper; every other line keeps its indent, as typed."""
+        def block(code, language=""):
+            recorded = f"--en-syntaxLanguage:{language};" if language else ""
+            return f"<div style=\"-en-codeblock:true;{recorded}\">" + "".join(
+                f"<div>{html.escape(line) or '<br/>'}</div>" for line in code.split("\n")) + "</div>"
+        cases = [
+            ("markup", block('<xsl:template match="/">\n...\n<xsl:apply-templates select="//a"/>\n</xsl:template>'),
+             'xml\n<xsl:template match="/">\n    ...\n    <xsl:apply-templates select="//a"/>\n</xsl:template>'),
+            ("braces, however deep", block("class A {\nvoid f() {\nif (x) {\ny();\n}\n}\n}", "cs"),
+             "csharp\nclass A {\n    void f() {\n        if (x) {\n            y();\n        }\n    }\n}"),
+            ("an indented block keeps its indent, even in its own style",
+             block("function f() {\n  if (x) {\n      y();\n  }\n}", "js"),
+             "javascript\nfunction f() {\n  if (x) {\n      y();\n  }\n}"),
+            ("lines moved with the line that opens their block keep their place in it",
+             block("var a = {\nb: function () {\n    c();\n}\n};", "js"),
+             "javascript\nvar a = {\n    b: function () {\n        c();\n    }\n};"),
+            ("braces in strings and comments don't count", block('function f() {\nvar s = "{"; // {\ny();\n}', "js"),
+             'javascript\nfunction f() {\n    var s = "{"; // {\n    y();\n}'),
+            ("tags that close themselves or never close don't open a block",
+             block("<div>\n<br>\n<img src=\"a\"/>\n<p>a</p>\n</div>"),
+             "html\n<div>\n    <br>\n    <img src=\"a\"/>\n    <p>a</p>\n</div>"),
+            ("code that kept its indent is kept as typed, whatever its style",
+             block("<html>\n<head>\n    <title>a</title>\n</head>\n<body>\n    <p>a</p>\n    <p>b</p>\n</body>\n</html>"),
+             "html\n<html>\n<head>\n    <title>a</title>\n</head>\n<body>\n    <p>a</p>\n    <p>b</p>\n</body>\n</html>"),
+            ("a brace opening a function passed to a call may sit as deep as the call",
+             block("void f() {\ng(x =>\n{\ny();\n});\n}", "cs"),
+             "csharp\nvoid f() {\n    g(x =>\n    {\n        y();\n    });\n}"),
+            ("a quote with no closing one is just a character, a closing tag with a space still closes",
+             block('[Route(“a")]\nclass A {\nint b;\n}',
+                   "cs") + block('<a>\nx\n</ a>\n<b/>'),
+             'csharp\n[Route(“a")]\nclass A {\n    int b;\n}\n```\n\n```html\n<a>\n    x\n</ a>\n<b/>'),
+            ("Razor's braces among the tags of a page",
+             block(
+                 "<ul>\n@{\nforeach(var a in Model)\n{\n<li>\n@a.Name\n</li>\n}\n}\n</ul>"),
+             "html\n<ul>\n    @{\n        foreach(var a in Model)\n        {\n            <li>\n                @a.Name\n"
+             "            </li>\n        }\n    }\n</ul>"),
+            ("a comment over several lines is lined up with its <!--",
+             block(
+                 "<p>\n    <!--\n        a\n          b\n        -->\n    <!-- one line -->\n</p>"),
+             "html\n<p>\n    <!--\n    a\n      b\n    -->\n    <!-- one line -->\n</p>"),
+            ("<head> and <body> may sit as deep as <html>",
+             block("<html>\n<head>\n<title>a</title>\n</head>\n</html>"),
+             "html\n<html>\n<head>\n    <title>a</title>\n</head>\n</html>"),
+            ("a line ending with a closing bracket isn't lined up with the opening one",
+             block("void f() {\ng(a,\n    b);\n}", "cs"), "csharp\nvoid f() {\n    g(a,\n        b);\n}"),
+            ("blank lines and comments, even with braces, over several lines",
+             block("void f() {\n/* a {\nb */\n\ng();\n}", "cs"), "csharp\nvoid f() {\n    /* a {\n    b */\n\n    g();\n}"),
+            ("a closing bracket with no opening one closes nothing", block("void f() {\ng();\n}\n}\nh();", "cs"),
+             "csharp\nvoid f() {\n    g();\n}\n}\nh();"),
+            ("a brace under a call, shallower than it, comes as deep as the call",
+             block("void f() {\n    g(x =>\n{\ny();\n});\n}", "cs"), "csharp\nvoid f() {\n    g(x =>\n    {\n        y();\n    });\n}"),
+            ("a comment never closed is left as it is", block("<div>\n<p>\nx\n</p>\n<!--\nopen"),
+             "html\n<div>\n    <p>\n        x\n    </p>\n    <!--\n    open"),
+            ("a language with no braces or tags is kept as typed", block("SELECT a\nFROM b\nWHERE c = 1"),
+             "sql\nSELECT a\nFROM b\nWHERE c = 1"),
+        ]
+        self.check_bodies(
+            [(case, content, f"```{expected}\n```") for case, content, expected in cases])
+
+    def test_code_in_a_list_item(self):
+        """A line of a list item that is all code is a code block in it, with an empty line
+        between it and the item's text, and two below the text, before the next item."""
+        self.check_bodies([
+            ("lines written with line breaks, however deep in formatting",
+             f"<ul><li><span><font {CONSOLAS}>a();</font><font><font {CONSOLAS}>b();<br/></font></font>"
+             "<span><br/>\nText.<br/><br/></span></span></li><li>next</li></ul>",
+             "- ```\n  a();b();\n  ```\n  &nbsp;\n  Text.\n  &nbsp;\n  &nbsp;\n- next"),
+            ("lines written as blocks, with no empty lines typed",
+             f"<ul><li><div><font {CONSOLAS}>a();</font></div><div>Text.</div></li>"
+             f"<li><div>Before:</div><div><font {CONSOLAS}>b();</font></div></li></ul>",
+             "- ```\n  a();\n  ```\n  &nbsp;\n  Text.\n  &nbsp;\n  &nbsp;\n- Before:\n  &nbsp;\n  ```\n  b();\n  ```"),
+            ("an item that is only code has one below it",
+             f"<ul><li><font {CONSOLAS}>a();</font></li><li>next</li></ul>", "- ```\n  a();\n  ```\n  &nbsp;\n- next"),
+            ("code in a sentence stays in it", f"<ul><li>call <font {CONSOLAS}>a()</font> first</li></ul>",
+             "- call `a()` first"),
+        ])
+
+    def test_code_wrapped_in_plain_lines(self):
+        """Lines that only wrap other lines don't keep pieces of code apart."""
+        self.check_bodies([
+            ("a piece inside a wrapping line is the next piece's neighbour",
+             f"<div><font {CONSOLAS}>a = 1;</font></div><div><br/></div>"
+             f"<div><div><font {CONSOLAS}>b = 2;</font></div><div>text</div></div>",
+             "```\na = 1;\n\nb = 2;\n```\n\ntext"),
+            ("a piece split across wrapping lines and an indent is one piece",
+             f"<div><div><div><font {CONSOLAS}>x {{</font></div></div></div>"
+             f"<blockquote><div><font {CONSOLAS}>y();</font></div></blockquote><div><font {CONSOLAS}>}}</font></div>",
+             "```\nx {\n    y();\n}\n```"),
+            ("an empty preformatted line is a blank line between pieces",
+             f"<div><font {CONSOLAS}>a = 1;</font></div><pre {CONSOLAS}><span><br/></span></pre><pre {CONSOLAS}></pre>"
+             f"<div><font {CONSOLAS}>b = 2;</font></div>",
+             "```\na = 1;\n\nb = 2;\n```"),
+            ("text in a wrapping line starts a line of its own",
+             "<div><span>a</span><div><span><br/></span><div>b</div></div></div>",
+             "a\n&nbsp;\n&nbsp;\n\nb"),
+            ("code left loose between lines is a line of the code",
+             f"<div><font {CONSOLAS}>a = {{</font></div><blockquote style=\"border: none;\">"
+             f"<font {CONSOLAS}>b: 1</font></blockquote><span style=\"font-family: Consolas;\">}};</span>"
+             f"<div><font {CONSOLAS}><br/></font></div><div>text</div>",
+             "```\na = {\n    b: 1\n};\n```\n\n&nbsp;\ntext"),
+            ("a word in another font glued to code is part of it",
+             f'<div><font color="#0000FF" {CONSOLAS}>string</font> css<font {CONSOLAS}>Source = read();</font></div>'
+             f"<div>css<font {CONSOLAS}>Out = f(</font>css<font {CONSOLAS}>Source);</font></div>",
+             "```\nstring cssSource = read();\ncssOut = f(cssSource);\n```"),
+            ("but a word with spaces around it is text", f"<div>call <font {CONSOLAS}>f()</font> now</div>",
+             "call `f()` now"),
+            ("nor is a word on a line of its own", f"<blockquote><div>q</div><div><font {CONSOLAS}>x();</font></div></blockquote>",
+             "q\n\n```\nx();\n```"),
+            ("a wrapping line with a colour keeps it", f'<div style="color:{RED};"><div>a</div><div>b</div></div>',
+             f"{RED_SPAN}a</span>\n\n{RED_SPAN}b</span>"),
+        ])
+
     def test_inline_code(self):
         self.check_bodies([
             ("monospaced word in a sentence", '<div>Call <span style="font-family: Consolas;">foo()</span> now</div>',
              "Call `foo()` now"),
             ("coloured tokens join into one piece",
              f'<ul><li><font color="#2B91AF" {CONSOLAS}>Action</font><font {CONSOLAS}>&lt;</font>'
-             f'<font color="#0000FF" {CONSOLAS}>int</font><font {CONSOLAS}>&gt; cb;</font></li></ul>',
-             "- `Action<int> cb;`"),
+             f'<font color="#0000FF" {CONSOLAS}>int</font><font {CONSOLAS}>&gt; cb;</font> declares it</li></ul>',
+             "- `Action<int> cb;` declares it"),
             ("tokens with spaces between them join into one piece",
              "<div>x <code>a</code> <code>b</code> y</div>", "x `a b` y"),
             ("a space after joined tokens stays outside them",
@@ -870,6 +1048,23 @@ class TestLanguageContext(ExportTest):
 class TestLanguageFromTags(ExportTest):
     """A note's tags name its language as its title does."""
 
+    def test_markup_hint_needs_markup(self):
+        """A title naming HTML or XML doesn't count for code with no markup outside its strings:
+        HTML is then what the note is about, not what the code is written in."""
+        for case, title, code, tags, expected in [
+            ("code handling HTML in a note about it", "Decodificare HTML",
+             '<pre>System.Net.WebUtility.HtmlDecode(text.Replace("&lt;p>", ""))</pre>', ("Develop - ASPX",), "```csharp"),
+            ("a tag in a note about XML", "Chiavi XML", '<pre>&lt;xsl:key name="k" match="//e" use="id"/></pre>',
+             ("Develop - XSLT",), "```xml"),
+            ("an attribute of a tag in a note about XML", "Chiavi XML", "<pre>select=\"key('k', $id)\"></pre>",
+             ("Develop - XSLT",), "```xml"),
+        ]:
+            with self.subTest(case):
+                self.setUp()
+                notes = self.export(note_xml(title, code, tags=tags))
+                self.assertEqual(
+                    body_of(notes[f"{title}.md"]).split("\n")[0], expected)
+
     def test_tags(self):
         csharp_or_js = '<pre>var id = new Regex("Pot(\\d+)").Matches(text)[0];</pre>'
         js_clue = "<pre>const id = text.match(pattern)[0];</pre>"
@@ -881,6 +1076,8 @@ class TestLanguageFromTags(ExportTest):
              js_clue, ("Develop - Javascript",), "```javascript"),
             ("a tag can't overrule the code", csharp_or_js,
              ("Develop - Javascript",), "```"),
+            ("LINQ's .Where( isn't SQL", "<pre>items.Where(x => x.On).ToList();</pre>",
+             ("Develop - C#",), "```csharp"),
             ("with no clue in the code, the tag's language", "<pre>System.Environment.MachineName</pre>",
              ("Develop - ASPX",), "```csharp"),
             ("but not when the code is something else",

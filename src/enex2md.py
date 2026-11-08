@@ -51,7 +51,8 @@ How the conversion works, and why:
   underlines, which Markdown has no syntax for either, <u>underlines</u>.
 - Indented lines lose their indent, since Markdown can't indent a line of
   text; a blank line after them marks where they end instead. Older Evernote
-  indented with a <blockquote> drawn without a bar: it's an indent, not a quote.
+  indented with a <blockquote> drawn without a bar, or around code: it's an
+  indent, not a quote.
 - Code pasted from an editor isn't an Evernote code block but lines in a
   monospaced font, with every token coloured; a run of lines whose text is all
   monospaced becomes one fenced code block, keeping its indentation and losing
@@ -116,6 +117,15 @@ MARKER_RUN = re.compile(r"[ \t]*[\x01-\x05](?:[ \t]*[\x01-\x05])*[ \t]*")
 BARE_MARKER_RUN = re.compile(r"([\x01-\x05]+)")
 # Stands for a code block's language until every block of the note is known
 LANGUAGE_SLOT = re.compile(r"\x07(\d+)\x07")
+# a fenced block whose language is yet to be named, at the margin or in a list item
+FENCED_BLOCK = re.compile(
+    r"^([ \t]*(?:[-*+] |\d+\. )?)(`{3,})(\x07\d+\x07)\n(.*?)\n(?=[ \t]*\2$)", re.M | re.S)
+BRACE_LANGUAGES = {"csharp", "javascript", "typescript", "css", "json", "java"}
+MARKUP_LANGUAGES = {"xml", "html"}
+BRACKETS = {"{": "}", "(": ")", "[": "]"}
+MARKUP_TAG = re.compile(r"<(/?)\s*([A-Za-z][\w:.-]*)(?:\s[^<>]*?)?(/?)>")
+VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+             "source", "track", "wbr", "!doctype"}
 # Stands for a link to another note until every note's file is known
 NOTE_LINK = re.compile(r"\x06(\d+)\x06")
 
@@ -128,6 +138,7 @@ LIST_ITEM = re.compile(r"[ \t]*(?:[-*+]|\d+[.)]) ")
 # row, or an indented line of one of them
 BLOCK_LINE = re.compile(r"[ \t]|(?:[-*+]|\d+[.)]) |>|\|")
 CODE_FENCE = re.compile(r"`{3,}|~{3,}")
+CODE_FENCE_LINE = re.compile(r"^`{3,}", re.M)
 LIST_PREFIX = re.compile(r"(?:[-*+]|\d+\.) (?:\[[ x]\] )?")
 IMAGE_LINE_END = re.compile(r"!\[[^\]]*\]\([^()\s]*\)(?:</span>)*$")
 PDF_LINE_END = re.compile(r"!\[[^\]]*\]\([^()\s]*\.pdf\)(?:</span>)*$", re.I)
@@ -152,8 +163,23 @@ CODE_INDENT = "    "
 # would read as bold. An opening token is the mark between MARK_OPEN, a closing
 # one between MARK_CLOSE.
 MARK_OPEN, MARK_CLOSE = "\x0e", "\x0f"
+# Evernote's highlight colour as a plain background, as some notes store a highlight
+HIGHLIGHT_YELLOW = re.compile(
+    r"background(-color)?:(rgb\(255,250,165\)|#fffaa5)")
+LINK_LINE = re.compile(r"\s*(?:\[[^\]\n]*\]\([^)\s]*\)|\x06\d+\x06)\s*")
+LINE_END = re.compile(r"[\n\x01-\x05]|$")
 MARK_TOKEN = re.compile(r"([\x0e\x0f])([^\x0e\x0f]+)\1")
-TOUCHING_MARKS = re.compile(r"\x0f([^\x0e\x0f]+)\x0f\x0e\1\x0e")
+# a space a mark held, written outside it, as Markdown can't end a mark on a space; it
+# still joins the pieces on either side, which a space outside the mark keeps apart
+MARKED_SPACE = "\x1f"
+TOUCHING_MARKS = re.compile(r"\x0f([^\x0e\x0f]+)\x0f(\x1f*)\x0e\1\x0e")
+# a colour span holding a marked piece in full, as a red word in a highlighted sentence
+# an underline holding a coloured piece in full: a browser draws the line in the
+# underline's own colour, so the colour goes outside it, as Evernote shows it
+UNDERLINED_SPAN = re.compile(
+    r"\x0e<u>\x0e(<span[^>]*>)((?:(?!</?span\b)[\s\S])*?)</span>\x0f<u>\x0f")
+SPAN_MARKED = re.compile(
+    r"(<span[^>]*>)\x0e([^\x0e\x0f]+)\x0e((?:(?!</?span\b)[\s\S])*?)\x0f\2\x0f</span>")
 
 # HTML
 VOID_TAGS = {"br", "hr", "img", "en-media", "en-todo", "input", "meta", "link",
@@ -215,7 +241,8 @@ LANGUAGE_PATTERNS = {language: [(re.compile(entry[0], re.M), entry[1]) if isinst
     "css": [r"^\s*[.#]?[\w-]+([\s>+~.#:][\w-]+)*\s*\{\s*$", r"^\s*[\w-]+\s*:\s*[^;{}]+;\s*$",
             r"@media\b|!important\b", r"\b\d+(px|em|rem|%)\b"],
     "sql": [r"\bSELECT\b[\s\S]+\b(?i:from)\b", r"\b(INSERT\s+INTO|DELETE\s+FROM|CREATE\s+TABLE|ALTER\s+TABLE)\b",
-            r"\bUPDATE\s+\w+\s+SET\b", r"\b(?i:where|group\s+by|order\s+by|inner\s+join|left\s+join|facet)\b"],
+            # after a dot, a method of the same name, as LINQ's .Where(
+            r"\bUPDATE\s+\w+\s+SET\b", r"(?<!\.)\b(?i:where|group\s+by|order\s+by|inner\s+join|left\s+join|facet)\b"],
     "bash": [r"^\s*\$\s+\w", SHELL_COMMAND, (r"^#!.*\b(ba|z)?sh\b", STRONG)],
     "python": [r"^\s*def\s+\w+\(.*\):\s*$", r"^\s*(from\s+\w+\s+)?import\s+\w+\s*$",
                r"\bself\.\w+", r"^\s*if\s+__name__\s*==", r"\bprint\("],
@@ -585,8 +612,24 @@ class NoteRenderer:
     # Blocks and their children
 
     def block_children(self, element: Element) -> str:
-        """Renders a block's content, dropping a <br> that ends it, as a browser does."""
-        kids = element.children
+        """Renders a block's content, dropping a <br> that ends it or comes right before a
+        block, as a browser does: the line ends there anyway."""
+        children = unwrapped(element.children)
+        kids = [kid for index, kid in enumerate(children)
+                if not (isinstance(kid, Element) and kid.tag == "br"
+                        and starts_line(next_kid(children, index + 1)))]
+        line_start = 0
+        for index, kid in enumerate(kids):
+            if starts_line(kid):
+                line_start = index + 1  # the next line starts after this block
+                continue
+            # a <br> ending a line inside formatting, as <span>a<br/></span>; on a
+            # line of its own, it is a blank line
+            ends_line = next_kid(kids, index + 1)
+            if (isinstance(kid, Element) and kid.tag != "br"
+                    and (ends_line is None or starts_line(ends_line))
+                    and has_content(kids[line_start:index + 1])):
+                drop_trailing_break(kid)
         end = len(kids)
         while end:
             kid = kids[end - 1]
@@ -597,23 +640,53 @@ class NoteRenderer:
         if isinstance(last, Element) and last.tag == "br" and any(
                 not isinstance(kid, str) or kid.strip() for kid in kids[:end - 1]):
             kids = kids[:end - 1]
-        return self.colored(self.blocks(kids))
+        return self.colored(self.blocks(loose_code_lined(kids)))
 
     def blocks(self, kids: list[Element | str]) -> str:
-        """Renders a block's children, turning each run of monospaced lines into one code block."""
+        """Renders a block's children, turning each run of monospaced lines into one code block.
+
+        Before Evernote had code blocks, code was pasted as lines in a monospaced
+        font: pieces of it with only blank lines between them are one piece, unless
+        their font or language differs, and a divider between them parts them, with
+        no need to draw it, as each piece is a block of its own now.
+        """
+        items = self.merge_monospace(kids)
         parts: list[str] = []
-        run: list[Element] = []
-        for kid in self.merge_monospace(kids):
-            if run and isinstance(kid, str) and not kid.strip():
-                continue  # the whitespace between code lines
-            if not self.code and isinstance(kid, Element) and is_code_line(kid):
-                run.append(kid)
+        index = 0
+        while index < len(items):
+            if self.code or not starts_code(items[index]):
+                parts.append(self.node(items[index]))
+                index += 1
                 continue
+            run, index = code_run(items, index)
+            while True:
+                gap, after = blank_lines(items, index)
+                if not gap or after == len(items) or not starts_code(items[after]):
+                    break
+                following, end = code_run(items, after)
+                if any(map(is_divider_line, gap)):
+                    # blank lines typed around the divider go with it
+                    while run and not code_text(run[-1]):
+                        run.pop()
+                    parts.append(self.code_lines(run))
+                    run = following[next(index for index, line in enumerate(
+                        following) if code_text(line)):]
+                elif self.one_piece(run, following):
+                    run = run + gap + following
+                else:
+                    break
+                index = end
             parts.append(self.code_lines(run))
-            run = []
-            parts.append(self.node(kid))
-        parts.append(self.code_lines(run))
         return "".join(parts)
+
+    def one_piece(self, run: list[Element], following: list[Element]) -> bool:
+        """Tells whether two runs of code lines are in the same font and, as far as can be
+        told, the same language."""
+        if code_fonts(run) != code_fonts(following):
+            return False
+        languages = [confident_language(language_scores(self.code_of(lines), self.hints), self.hints)
+                     for lines in (run, following)]
+        return not all(languages) or languages[0] == languages[1]
 
     def children(self, element: Element) -> str:
         return "".join(map(self.node, self.merge_monospace(element.children)))
@@ -718,7 +791,8 @@ class NoteRenderer:
                     r"font-weight:(bold|[6-9]00)", style), "**"),
                 (tag in ("i", "em", "cite") or "font-style:italic" in style, "*"),
                 (tag in ("s", "strike", "del") or "line-through" in style, "~~"),
-                ("--en-highlight:" in style or "-evernote-highlight:true" in style, "=="),
+                ("--en-highlight:" in style or "-evernote-highlight:true" in style
+                 or HIGHLIGHT_YELLOW.search(style), "=="),
                 (tag in ("u", "ins") or "underline" in style, "<u>"),
             ) if applies]
             inline = self.wrap(node, marks)
@@ -765,7 +839,7 @@ class NoteRenderer:
         opening = "".join(MARK_OPEN + mark + MARK_OPEN for mark in marks)
         closing = "".join(MARK_CLOSE + mark + MARK_CLOSE
                           for mark in reversed(marks))
-        return f"{lead}{opening}{core}{closing}{trail}"
+        return f"{lead.replace(' ', MARKED_SPACE)}{opening}{core}{closing}{trail.replace(' ', MARKED_SPACE)}"
 
     def link(self, element: Element) -> str:
         href = (element.attrs.get("href") or "").strip()
@@ -877,10 +951,13 @@ class NoteRenderer:
                     if "-en-codeblock:true" in style]
         language = next(
             (value for value in recorded if value is not None), None)
-        with self.in_code():
-            text = BARE_MARKER_RUN.sub(
-                code_newlines, LINE.join(map(self.node, lines)))
+        text = self.code_of(lines)
         return "".join(map(self.node, before)) + self.fence(text, language) + "".join(map(self.node, after))
+
+    def code_of(self, lines: list[Element]) -> str:
+        """Returns the text of lines of code, as typed."""
+        with self.in_code():
+            return BARE_MARKER_RUN.sub(code_newlines, LINE.join(map(self.node, lines)))
 
     def fence(self, text: str, language: str | None) -> str:
         """Fences a code block; with no language recorded (None), its language is decided later."""
@@ -888,23 +965,20 @@ class NoteRenderer:
         text = textwrap.dedent(text.strip("\n").rstrip())
         if not text.strip():
             return ""
-        if language is None:
-            self.languages.append(language_scores(text, self.hints))
-            language = f"\x07{len(self.languages) - 1}\x07"
-        else:
-            self.languages.append(language)
-        return fenced(text, language)
+        self.languages.append(language_scores(
+            text, self.hints) if language is None else language)
+        return fenced(text, f"\x07{len(self.languages) - 1}\x07")
 
     def fill_languages(self, body: str) -> str:
         """Names each guessed block's language, taking the note's usual language when the
-        block's own code is too short to tell but fits it."""
+        block's own code is too short to tell but fits it, and indents its lines where
+        their nesting shows they've lost their indent."""
         named = [entry if isinstance(entry, str) else confident_language(entry, self.hints)
                  for entry in self.languages]
         usual = collections.Counter(
             language for language in named if language).most_common(1)
 
-        def language(match: re.Match) -> str:
-            index = int(match.group(1))
+        def language(index: int) -> str:
             scores = self.languages[index]
             if named[index] or not usual or isinstance(scores, str):
                 return named[index]
@@ -913,9 +987,20 @@ class NoteRenderer:
             score = scores.get(best, 0)
             return best if score >= 1 and score == max(scores.values()) else ""
 
-        return LANGUAGE_SLOT.sub(language, body)
+        def block(match: re.Match) -> str:
+            start, fence, slot, text = match.groups()
+            name = language(int(slot.strip("\x07")))
+            # the lines of a block in a list item are indented as deep as its fence
+            margin = " " * len(start)
+            lines = [line[len(margin):] for line in text.split("\n")]
+            if all(line.startswith(margin) or not line.strip() for line in text.split("\n")):
+                text = "\n".join(
+                    margin + line if line else line for line in aligned_comments(reindented(lines, name), name))
+            return f"{start}{fence}{name}\n{text}\n"
 
-    # Headings, lists, tables and quotes
+        return LANGUAGE_SLOT.sub(lambda match: language(int(match.group(1))), FENCED_BLOCK.sub(block, body))
+
+    # Headings, lists and tables
 
     def heading(self, element: Element, level: int) -> str:
         text = re.sub(r"\\?\n", " ", resolve(self.block_children(element)))
@@ -927,6 +1012,8 @@ class NoteRenderer:
         number = int(start) if start.isdigit() else 1
         items: list[str] = []
         widths: list[int] = []
+        # the items empty lines go below, and how many
+        spaced: dict[int, int] = {}
         self.list_depth += 1
         try:
             for child in element.children:
@@ -944,7 +1031,7 @@ class NoteRenderer:
                 is_item = isinstance(child, Element) and child.tag == "li"
                 child_style = ""
                 if isinstance(child, Element) and is_item:
-                    item = child
+                    item = lines_of_code(child) or child
                     child_style = style_of(item)
                     body = resolve(self.with_color(
                         item, child_style, lambda own: self.block_children(item)))
@@ -956,6 +1043,11 @@ class NoteRenderer:
                     marker += " [x]" if "--en-checked:true" in child_style else " [ ]"
                 elif not body:
                     continue
+                if CODE_FENCE_LINE.search(body):
+                    body = spaced_code(body)
+                    # two below text, as after a paragraph; one below code, which ends a block
+                    spaced[len(items)] = 1 if CODE_FENCE_LINE.match(
+                        body.rsplit("\n", 1)[-1]) else 2
                 items.append(f"{marker} " + indent(body,
                              len(bullet) + 1, first=False))
                 widths.append(len(bullet) + 1)
@@ -964,6 +1056,10 @@ class NoteRenderer:
             self.list_depth -= 1
         if not items:
             return ""
+        # an item holding code has empty lines below it, before the next item
+        for index, count in spaced.items():
+            if index < len(items) - 1:
+                items[index] += ("\n" + " " * widths[index] + "&nbsp;") * count
         separator = LINE if self.list_depth else PARA
         return separator + "\n".join(items) + separator
 
@@ -1001,6 +1097,7 @@ class NoteRenderer:
 
 # Reading the HTML tree
 
+
 def style_of(element: Element, spaces: bool = False) -> str:
     """Returns an element's inline style in lower case, without spaces unless asked, ready
     to match; quotes some notes store encoded, as in font-family: &apos;Courier New&apos;,
@@ -1034,6 +1131,226 @@ def text_color(element: Element, style: str) -> str | None:
     return None if max(channels) - min(channels) <= GREY_SPREAD else value
 
 
+def starts_code(item: Element | str) -> bool:
+    return isinstance(item, Element) and is_code_line(item)
+
+
+def code_run(items: list[Element | str], index: int) -> tuple[list[Element], int]:
+    """Returns the lines of code from index on, and where they end."""
+    run: list[Element] = []
+    while index < len(items):
+        item = items[index]
+        if isinstance(item, Element) and is_code_line(item):
+            run.append(item)
+        elif not isinstance(item, str) or item.strip():
+            break  # whitespace between the lines is skipped
+        index += 1
+    return run, index
+
+
+def blank_lines(items: list[Element | str], index: int) -> tuple[list[Element], int]:
+    """Returns the empty lines and dividers from index on, and where they end."""
+    gap: list[Element] = []
+    while index < len(items):
+        item = items[index]
+        if isinstance(item, Element) and (is_divider_line(item) or (
+                (item.tag in BLOCK_TAGS or item.tag in ("p", "pre")) and not has_content(item.children))):
+            gap.append(item)
+        elif not isinstance(item, str) or item.strip():
+            break
+        index += 1
+    return gap, index
+
+
+def is_divider_line(element: Element) -> bool:
+    """Tells whether an element is a divider, or a line holding nothing but one."""
+    return element.tag == "hr" or (not has_content(element.children) and any(
+        isinstance(kid, Element) and is_divider_line(kid) for kid in element.children))
+
+
+def code_fonts(lines: list[Element]) -> set[str]:
+    """Returns the monospaced fonts the text of lines of code is set in."""
+    fonts: set[str] = set()
+
+    def walk(element: Element, font: str) -> None:
+        if is_monospace(element) or element.tag in CODE_TAGS:
+            style = (element.attrs.get("style") or "").lower()
+            match = re.search(r"font-family:([^;]+)", style)
+            family = match.group(1) if match else (
+                element.attrs.get("face") or element.tag)
+            font = family.split(",")[0].strip(" '\"").lower()
+        for kid in element.children:
+            if isinstance(kid, str):
+                if kid.strip() and font:
+                    fonts.add(font)
+            else:
+                walk(kid, font)
+
+    for line in lines:
+        walk(line, "")
+    return fonts
+
+
+def loose_code_lined(kids: list[Element | str]) -> list[Element | str]:
+    """Puts code left loose between lines, as a } after indented lines, on a line of its
+    own, as a browser draws it, so that it joins the code around it."""
+    if not any(starts_line(kid) for kid in kids):
+        return kids
+    result: list[Element | str] = []
+    run: list[Element | str] = []
+    for kid in kids + [Element("div", [])]:
+        if not starts_line(kid):
+            run.append(kid)
+            continue
+        line = Element("div", [])
+        line.children = run
+        result += [line] if is_code_line(line) and code_text(line) else run
+        result.append(kid)
+        run = []
+    return result[:-1]
+
+
+def lines_of_code(item: Element) -> Element | None:
+    """Returns a list item written as lines with line breaks as one with a block per line,
+    when a line is all code, so that the code becomes a code block in the item."""
+    if any(starts_line(kid) for kid in item.children):
+        return None
+    lines = split_at_breaks(item.children)
+    if not has_content(lines[-1]):
+        lines.pop()  # a line break ending the item draws nothing
+    blocks = []
+    for line in lines:
+        block = Element("div", [])
+        block.children = line if has_content(line) else [Element("br", [])]
+        blocks.append(block)
+    if not any(is_code_line(block) and code_text(block) for block in blocks):
+        return None
+    lined = Element(item.tag, list(item.attrs.items()))
+    lined.children = list(blocks)
+    return lined
+
+
+def split_at_breaks(kids: list[Element | str]) -> list[list[Element | str]]:
+    """Splits inline content into its lines at each <br>, however deep in formatting,
+    each line keeping the formatting around its part."""
+    lines: list[list[Element | str]] = [[]]
+    for kid in kids:
+        if isinstance(kid, str):
+            lines[-1].append(kid)
+        elif kid.tag == "br":
+            lines.append([])
+        else:
+            for index, part in enumerate(split_at_breaks(kid.children)):
+                if index:
+                    lines.append([])
+                piece = Element(kid.tag, list(kid.attrs.items()))
+                piece.children = part
+                lines[-1].append(piece)
+    return lines
+
+
+def spaced_code(body: str) -> str:
+    """Sets one empty line between the code blocks of a list item and its text, in place
+    of the blank lines around them, and none at its end, where the list sets it."""
+    segments: list[tuple[bool, list[str]]] = []
+    text: list[str] = []
+    lines = body.split("\n")
+    index = 0
+    while index < len(lines):
+        fence = CODE_FENCE_LINE.match(lines[index])
+        if not fence:
+            text.append(lines[index])
+            index += 1
+            continue
+        end = index + 1
+        while end < len(lines) and lines[end] != fence.group(0):
+            end += 1
+        segments += [(False, text), (True, lines[index:end + 1])]
+        text, index = [], end + 1
+    segments.append((False, text))
+    result: list[str] = []
+    for number, (code, part) in enumerate(segments):
+        if not code:
+            blank = ("", "&nbsp;")
+            while number and part and part[0].strip() in blank:
+                part = part[1:]
+            while part and part[-1].strip() in blank:
+                part = part[:-1]
+            if not part:
+                continue
+            part = (["&nbsp;"] if number else []) + part + \
+                (["&nbsp;"] if number < len(segments) - 1 else [])
+        result += part
+    return "\n".join(result)
+
+
+def unwrapped(kids: list[Element | str]) -> list[Element | str]:
+    """Replaces each plain line that only wraps other lines with what it wraps, so that the
+    lines inside are neighbours of the ones around it, as a browser shows them."""
+    result: list[Element | str] = []
+    for kid in kids:
+        if not (isinstance(kid, Element) and wraps_lines(kid)):
+            result.append(kid)
+            continue
+        # text and formatting the wrapper holds between its lines are lines of their own
+        line: list[Element | str] = []
+        for inner in unwrapped(kid.children) + [Element("div", [])]:
+            if not starts_line(inner):
+                line.append(inner)
+                continue
+            if any(not isinstance(piece, str) or piece.strip() for piece in line):
+                wrapped = Element("div", [])
+                wrapped.children = line
+                result.append(wrapped)
+            line = []
+            result.append(inner)
+        result.pop()
+    return result
+
+
+def wraps_lines(element: Element) -> bool:
+    """Tells whether an element is a plain <div> holding lines of its own, with no colour,
+    indent, font or other formatting that its lines would lose."""
+    if element.tag != "div" or not any(starts_line(kid) for kid in element.children):
+        return False
+    style = style_of(element)
+    return not (text_color(element, style) or INDENT_STYLE.search(style) or "font" in style
+                or "-en-codeblock" in style or "highlight" in style or "decoration" in style)
+
+
+def next_kid(kids: list[Element | str], start: int) -> Element | str | None:
+    """Returns the first of the kids from start on that isn't blank text."""
+    return next((kid for kid in kids[start:] if not isinstance(kid, str) or kid.strip()), None)
+
+
+def drop_trailing_break(element: Element) -> None:
+    """Removes the <br> an inline element ends with, however deep in its formatting."""
+    for index in range(len(element.children) - 1, -1, -1):
+        kid = element.children[index]
+        if isinstance(kid, str):
+            if kid.strip():
+                return
+        elif kid.tag == "br":
+            del element.children[index]
+            return
+        else:
+            drop_trailing_break(kid)
+            return
+
+
+def has_content(kids: list[Element | str]) -> bool:
+    """Tells whether a line's pieces hold text or a picture, not only line breaks."""
+    return any(kid.strip() if isinstance(kid, str)
+               else kid.tag in ("en-media", "img") or has_content(kid.children) for kid in kids)
+
+
+def starts_line(kid: Element | str | None) -> bool:
+    """Tells whether a block's child is a block, which a browser starts on a line of its own."""
+    return isinstance(kid, Element) and (
+        kid.tag in BLOCK_TAGS or kid.tag in HEADING_TAGS
+        or kid.tag in ("p", "blockquote", "ul", "ol", "table", "hr", "pre"))
+
+
 def is_monospace(element: Element) -> bool:
     """Tells whether an element sets a monospaced font, as code pasted from an editor has."""
     match = re.search(r"font-family:([^;]+)", style_of(element, spaces=True))
@@ -1044,8 +1361,16 @@ def is_monospace(element: Element) -> bool:
 
 
 def is_indent(element: Element) -> bool:
-    """Tells whether a blockquote is older Evernote's indent, drawn with no quote bar."""
-    return element.tag == "blockquote" and "border:none" in style_of(element)
+    """Tells whether a blockquote is older Evernote's indent: drawn with no quote bar, or
+    around code, which it indented with one."""
+    return element.tag == "blockquote" and ("border:none" in style_of(element) or holds_code(element))
+
+
+def holds_code(element: Element) -> bool:
+    """Tells whether an element holds code: text in a monospaced font, or a code block."""
+    return any(isinstance(kid, Element) and (
+        is_monospace(kid) or kid.tag in CODE_TAGS or "-en-codeblock" in style_of(kid) or holds_code(kid))
+        for kid in element.children)
 
 
 def is_code_line(element: Element) -> bool:
@@ -1054,7 +1379,47 @@ def is_code_line(element: Element) -> bool:
         return False
     if element.tag in ("li", "td", "th", "tr", "thead", "tbody", "tfoot", "dl", "en-note"):
         return False
-    return monospace_only(element, False) == "mono"
+    return monospace_only(element, False) == "mono" or glued_code(element)
+
+
+def glued_code(element: Element) -> bool:
+    """Tells whether a line is code with words in another font glued to it, as css in
+    cssSource, typed in later in front of a name: text with code in it has spaces around
+    the code."""
+    pieces = [(text, mono)
+              for text, mono in font_pieces(element, False) if text]
+    if not any(mono and text.strip() for text, mono in pieces):
+        return False
+    for index, (text, mono) in enumerate(pieces):
+        if mono or not text.strip():
+            continue
+        if not re.fullmatch(r"\s*\w+\s*", text):
+            return False
+        before = pieces[index - 1] if index else ("", False)
+        after = pieces[index + 1] if index + 1 < len(pieces) else ("", False)
+        glued_before = not text[0].isspace(
+        ) and before[1] and re.search(r"\w$", before[0])
+        glued_after = not text[-1].isspace() and after[1] and re.match(r"\w", after[0])
+        if not (glued_before or glued_after):
+            return False
+    return True
+
+
+def font_pieces(element: Element, mono: bool) -> list[tuple[str, bool]]:
+    """Returns an element's text, piece by piece, each telling whether it's monospaced;
+    a picture, list or other block that can't be code is a piece of text."""
+    mono = mono or is_monospace(element) or element.tag in CODE_TAGS
+    pieces: list[tuple[str, bool]] = []
+    for child in element.children:
+        if isinstance(child, str):
+            pieces.append((child, mono))
+        elif child.tag in ("en-media", "img", "table", "ul", "ol", "hr", "en-todo"):
+            pieces.append(("\0", False))
+        elif child.tag not in SKIPPED_TAGS:
+            # a line of its own isn't glued to the text around it
+            edge = [("\n", False)] if starts_line(child) else []
+            pieces += edge + font_pieces(child, mono) + edge
+    return pieces
 
 
 def is_inline_code(element: Element) -> bool:
@@ -1145,6 +1510,9 @@ def newlines(match: re.Match, paragraphs: bool = False) -> str:
         blank = 1  # one blank line under a picture, however many were typed
     # a line after a list item, such as a to-do line, would join the item
     after_item = LIST_ITEM.match(text, line_start)
+    if not blank and paragraphs and is_link_line(text[line_start:match.start()]) and is_link_line(
+            text[match.end():LINE_END.search(text, match.end()).end() - 1]):  # type: ignore[union-attr]
+        return HARD_BREAK  # a list of links sits tight, as a list does
     if not blank:
         # each line is a paragraph, and so is a picture in a list item, which
         # Evernote draws on a line of its own with the gap of one
@@ -1180,6 +1548,11 @@ def newlines(match: re.Match, paragraphs: bool = False) -> str:
         # after their space and a paragraph's
         return (HARD_BREAK + BLANK_LINE) * blank + "\n\n"
     return HARD_BREAK + (BLANK_LINE + HARD_BREAK) * blank
+
+
+def is_link_line(line: str) -> bool:
+    """Tells whether a line holds nothing but a link, however formatted."""
+    return bool(LINK_LINE.fullmatch(MARK_TOKEN.sub("", line).replace(LINE_START_MARK, "")))
 
 
 def code_newlines(match: re.Match) -> str:
@@ -1218,6 +1591,195 @@ def fenced(text: str, language: str) -> str:
     return PARA + f"{fence}{language}\n{text}\n{fence}" + PARA
 
 
+def reindented(lines: list[str], language: str) -> list[str]:
+    """Indents lines of code one level deeper than the line that opens their block, wherever
+    they aren't, in code that has lost its indent: inside braces in a language that uses
+    them, or inside a tag in markup. Every other line keeps its indent, as typed, and so
+    does code that hasn't lost it, whatever its style."""
+    nesting = BRACE_NESTING if language in BRACE_LANGUAGES else TAG_NESTING if language in MARKUP_LANGUAGES else None
+    if not nesting or not lost_indent(lines, language, nesting):
+        return lines
+    widths = {indent_width(line) for line in lines if line.strip()}
+    unit = 2 if min(widths - {0}, default=4) == 2 else 4
+    # the open blocks: the name that closes each, its line's indent, and how far that moved
+    stack: list[tuple[str, int, int]] = []
+    state = {"comment": False}
+    result = []
+    for line in lines:
+        if not line.strip():
+            result.append(line)
+            continue
+        own = indent_width(line)
+        tokens = nesting(line.strip(), language, state)
+        closing = 0  # the blocks the line's start closes
+        while closing < len(tokens) and tokens[closing][0] == "lead":
+            closing += 1
+        opener = None
+        for _, name in tokens[:closing]:
+            opener = close_block(stack, name) or opener
+        if opener and not line.strip().startswith("#"):
+            width = opener[1]
+        else:
+            parent = stack[-1] if stack else None
+            moved = parent[2] if parent else 0
+            width = max(own + moved, 0)
+            if parent and width <= parent[1] and not at_parent_depth(line, parent):
+                width = parent[1] + unit
+            elif parent and width < parent[1] and line.lstrip().startswith("{"):
+                width = parent[1]
+        if width != own:
+            line = " " * width + line.lstrip()
+        for kind, name in tokens[closing:]:
+            if kind == "open":
+                stack.append((name, width, width - own))
+            else:
+                close_block(stack, name)
+        result.append(line)
+    return result
+
+
+def aligned_comments(lines: list[str], language: str) -> list[str]:
+    """Lines up the lines of a comment in markup that spans several, and its closing -->,
+    with the <!-- that opens it, keeping how its lines are indented among themselves."""
+    if language not in MARKUP_LANGUAGES:
+        return lines
+    result = list(lines)
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not line.lstrip().startswith("<!--") or "-->" in line:
+            index += 1
+            continue
+        end = next((later for later in range(index + 1, len(lines))
+                   if "-->" in lines[later]), None)
+        if end is None:
+            break
+        margin = line[:len(line) - len(line.lstrip())]
+        inside = lines[index + 1:end + 1]
+        depth = min((indent_width(piece)
+                    for piece in inside if piece.strip()), default=0)
+        result[index + 1:end + 1] = [margin + " " * (indent_width(piece) - depth) + piece.lstrip() if piece.strip() else piece
+                                     for piece in inside]
+        index = end + 1
+    return result
+
+
+def lost_indent(lines: list[str], language: str, nesting) -> bool:
+    """Tells whether at least half the lines inside blocks are no deeper than the line that
+    opens theirs: some styles leave a few at its depth, as <body> under <html>, or { under
+    a call it passes a function to, but not most."""
+    stack: list[tuple[str, int, int]] = []
+    state = {"comment": False}
+    nested = shallow = 0
+    for line in lines:
+        if not line.strip():
+            continue
+        own = indent_width(line)
+        tokens = nesting(line.strip(), language, state)
+        closing = [name for kind, name in tokens if kind == "lead"]
+        for name in closing:
+            close_block(stack, name)
+        if stack and not closing and not at_parent_depth(line, stack[-1]):
+            nested += 1
+            shallow += own <= stack[-1][1]
+        for kind, name in tokens[len(closing):]:
+            if kind == "open":
+                stack.append((name, own, 0))
+            else:
+                close_block(stack, name)
+    return nested > 0 and shallow * 2 >= nested
+
+
+def at_parent_depth(line: str, parent: tuple[str, int, int]) -> bool:
+    """Tells whether a line may sit as deep as the line opening its block: a preprocessor
+    line, as #region, a brace opening the body of a function passed to a call, or <head>
+    and <body> in <html>."""
+    line = line.strip()
+    return line.startswith("#") or (line.startswith("{") and parent[0] == ")") or parent[0] == "html"
+
+
+def close_block(stack: list[tuple[str, int, int]], name: str) -> tuple[str, int, int] | None:
+    """Closes the innermost open block a name closes, with the ones left open inside it."""
+    for index in range(len(stack) - 1, -1, -1):
+        if stack[index][0] == name:
+            opener = stack[index]
+            del stack[index:]
+            return opener
+    return None
+
+
+def indent_width(line: str) -> int:
+    indent = line[:len(line) - len(line.lstrip())]
+    return len(indent.expandtabs(4))
+
+
+def brace_nesting(line: str, language: str, state: dict[str, bool]) -> list[tuple[str, str]]:
+    """Returns the brackets a line of code opens and closes, outside strings and comments."""
+    tokens: list[tuple[str, str]] = []
+    index = 0
+    while index < len(line):
+        if state["comment"]:
+            end = line.find("*/", index)
+            if end < 0:
+                break
+            state["comment"], index = False, end + 2
+            continue
+        char = line[index]
+        if line.startswith("/*", index):
+            state["comment"], index = True, index + 2
+            continue
+        if line.startswith("//", index) and language != "css":
+            break
+        if char in "\"'`":
+            end = index + 1
+            while end < len(line) and line[end] != char:
+                end += 2 if line[end] == "\\" else 1
+            # a quote with no closing one on its line, as after a typographic one, is
+            # just a character
+            index = end + 1 if end < len(line) else index + 1
+            continue
+        if char in "{([":
+            tokens.append(("open", BRACKETS[char]))
+        elif char in "})]":
+            # a closing bracket the line starts with closes before the line starts
+            leading = not line[:index].strip(" \t})]")
+            tokens.append(("lead" if leading else "close", char))
+        index += 1
+    return tokens
+
+
+def tag_nesting(line: str, language: str, state: dict[str, bool]) -> list[tuple[str, str]]:
+    """Returns the tags a line of markup opens and closes, outside comments."""
+    if state["comment"]:
+        end = line.find("-->")
+        if end < 0:
+            return []
+        state["comment"], line = False, line[end + 3:]
+    if "<!--" in line and "-->" not in line[line.rfind("<!--"):]:
+        state["comment"] = True
+    line = re.sub(r"<!--.*?(-->|$)", "", line)
+    tokens = []
+    for match in MARKUP_TAG.finditer(line):
+        slash, name, end = match.groups()
+        if end or name.lower() in VOID_TAGS:
+            continue
+        # a closing tag the line starts with closes before the line starts
+        leading = slash and not MARKUP_TAG.sub(
+            "", line[:match.start()]).strip()
+        tokens.append(
+            ("lead" if leading else "close" if slash else "open", name.lower()))
+    if language == "html":
+        # Razor's @{ … } and the C# inside it, among a page's tags
+        text = MARKUP_TAG.sub(lambda match: " " * len(match.group(0)), line)
+        braces = brace_nesting(text, language, {"comment": False})
+        leading = [token for token in braces if token[0] == "lead"]
+        tokens = leading + tokens + braces[len(leading):]
+    return tokens
+
+
+BRACE_NESTING, TAG_NESTING = brace_nesting, tag_nesting
+
+
 def longest_run(text: str, char: str) -> int:
     return max((len(run) for run in re.findall(re.escape(char) + "+", text)), default=0)
 
@@ -1236,12 +1798,31 @@ def escape_line_starts(text: str) -> str:
 
 def write_marks(text: str) -> str:
     """Writes the formatting marks' tokens as Markdown, first joining pieces with the
-    same mark that touch, such as two highlighted spans side by side."""
+    same mark that touch, such as two highlighted spans side by side, or a highlighted
+    sentence and a word in it in another colour."""
+    text = UNDERLINED_SPAN.sub("\\1\x0e<u>\x0e\\2\x0f<u>\x0f</span>", text)
     joined = 1
     while joined:  # once the innermost marks join, the ones around them touch
-        text, joined = TOUCHING_MARKS.subn("", text)
+        text = SPAN_MARKED.sub(
+            lambda match: mark_around_span(match, text), text)
+        text, joined = TOUCHING_MARKS.subn(r"\2", text)
     return MARK_TOKEN.sub(lambda match: closing_mark(match.group(2))
-                          if match.group(1) == MARK_CLOSE else match.group(2), text)
+                          if match.group(1) == MARK_CLOSE else match.group(2), text).replace(MARKED_SPACE, " ")
+
+
+def mark_around_span(match: re.Match, text: str) -> str:
+    """Moves the mark a colour span holds in full outside it, when the same mark touches
+    the span, so that the pieces join; leaves it inside otherwise."""
+    span, mark, inner = match.groups()
+    if mark == "<u>":
+        # an underline stays inside the colour, to be drawn in it
+        return match.group(0)
+    token = MARK_OPEN + mark + MARK_OPEN, MARK_CLOSE + mark + MARK_CLOSE
+    before = text[:match.start()].rstrip(MARKED_SPACE)
+    after = text[match.end():].lstrip(MARKED_SPACE)
+    if not (before.endswith(token[1]) or after.startswith(token[0])):
+        return match.group(0)
+    return f"{token[0]}{span}{inner}</span>{token[1]}"
 
 
 def closing_mark(mark: str) -> str:
@@ -1294,8 +1875,18 @@ def language_scores(code: str, hints: tuple[str, ...] = ()) -> dict[str, int]:
         # nothing but commands, such as one "brew install"
         scores["bash"] += STRONG
     for language in hints:
+        # a note about HTML may hold code that only handles it, as C# decoding "<p>"
+        if language in MARKUP_LANGUAGES and not has_markup(code):
+            continue
         scores[language] += 1
     return scores
+
+
+def has_markup(code: str) -> bool:
+    """Tells whether code holds tags outside its quoted strings, or a tag's attributes,
+    as XSLT's select="…" on its own."""
+    bare = re.sub(r'"[^"\n]*"|\'[^\'\n]*\'', "", code)
+    return bool(re.search(r"<[A-Za-z!?/]", bare) or re.search(r"(^|\s)[\w:.-]+=(?=\s|/?>|$)", bare, re.M))
 
 
 def outright_language(code: str) -> str:
@@ -1336,6 +1927,8 @@ def confident_language(scores: dict[str, int], hints: tuple[str, ...] = ()) -> s
     (best, top), (_, second) = ranked[0], ranked[1]
     if top >= 2 and top > second:
         return best
+    # a hint the code doesn't bear out, as HTML for code with no markup, scores nothing
+    hints = tuple(language for language in hints if scores.get(language))
     shown = {language for language,
              score in scores.items() if score and language not in hints}
     return hints[0] if len(hints) == 1 and not shown else ""

@@ -165,6 +165,14 @@ CODE_INDENT = "    "
 # would read as bold. An opening token is the mark between MARK_OPEN, a closing
 # one between MARK_CLOSE.
 MARK_OPEN, MARK_CLOSE = "\x0e", "\x0f"
+# what YAML can read as plain text: no space at the edges, nothing that starts another
+# kind of value, as [ or a "- " item, and no line breaks
+YAML_PLAIN = re.compile(r"(?![,\[\]{}#&*!|>'\"%@`])(?![-?:](\s|$))\S(.*\S)?")
+# a key's colon, a comment's #, or a document marker
+YAML_NOT_PLAIN = re.compile(r":(\s|$)|\s#|^---|^\.\.\.")
+# what YAML reads as null, a boolean or a number
+YAML_SCALAR = re.compile(r"~|(?i:null|true|false)|[-+]?(\d[\d_]*(\.\d*)?|\.\d+)([eE][-+]?\d+)?|0x[\da-fA-F]+|0o[0-7]+"
+                         r"|[-+]?\.(?i:inf)|\.(?i:nan)")
 HIGHLIGHT_OPEN, HIGHLIGHT_CLOSE = MARK_OPEN + \
     "==" + MARK_OPEN, MARK_CLOSE + "==" + MARK_CLOSE
 # a colour span right inside one of the same colour, as joining highlights may leave
@@ -174,6 +182,7 @@ DOUBLE_SPAN = re.compile(
 HIGHLIGHT_YELLOW = re.compile(
     r"background(-color)?:(rgb\(255,250,165\)|#fffaa5)")
 LINK_LINE = re.compile(r"\s*(?:\[[^\]\n]*\]\([^)\s]*\)|\x06\d+\x06)\s*")
+TYPED_BULLET = re.compile(r"\s*•\s")
 LINE_END = re.compile(r"[\n\x01-\x05]|$")
 MARK_TOKEN = re.compile(r"([\x0e\x0f])([^\x0e\x0f]+)\1")
 # a space a mark held, written outside it, as Markdown can't end a mark on a space; it
@@ -539,6 +548,10 @@ def front_matter(note: Note) -> str:
 
 
 def yaml_string(value: str) -> str:
+    """Writes a front matter value plainly, as Obsidian does when it saves a note, or in
+    quotes when YAML would read it as something else."""
+    if YAML_PLAIN.fullmatch(value) and not YAML_NOT_PLAIN.search(value) and not YAML_SCALAR.fullmatch(value):
+        return value
     return json.dumps(value, ensure_ascii=False)  # a JSON string is valid YAML
 
 
@@ -1606,9 +1619,8 @@ def newlines(match: re.Match, paragraphs: bool = False) -> str:
         blank = 1  # one blank line under a picture, however many were typed
     # a line after a list item, such as a to-do line, would join the item
     after_item = LIST_ITEM.match(text, line_start)
-    if not blank and paragraphs and is_link_line(text[line_start:match.start()]) and is_link_line(
-            text[match.end():LINE_END.search(text, match.end()).end() - 1]):  # type: ignore[union-attr]
-        return HARD_BREAK  # a list of links sits tight, as a list does
+    if not blank and paragraphs and is_list_like(text[line_start:match.start()], line_from(text, match.end())):
+        return HARD_BREAK  # a list of links or of typed bullets sits tight, as a list does
     if not blank:
         # each line is a paragraph, and so is a picture in a list item, which
         # Evernote draws on a line of its own with the gap of one
@@ -1644,6 +1656,17 @@ def newlines(match: re.Match, paragraphs: bool = False) -> str:
         # after their space and a paragraph's
         return (HARD_BREAK + BLANK_LINE) * blank + "\n\n"
     return HARD_BREAK + (BLANK_LINE + HARD_BREAK) * blank
+
+
+def line_from(text: str, start: int) -> str:
+    """Returns the rest of the line that starts at start, up to its line break or marker."""
+    return text[start:next(LINE_END.finditer(text, start)).start()]
+
+
+def is_list_like(line: str, following: str) -> bool:
+    """Tells whether two lines are items of a list made of plain lines: links, or typed bullets."""
+    return (is_link_line(line) and is_link_line(following)) or bool(
+        TYPED_BULLET.match(line) and TYPED_BULLET.match(following))
 
 
 def is_link_line(line: str) -> bool:

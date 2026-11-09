@@ -311,19 +311,41 @@ class TestFrontMatterAndTags(ExportTest):
             tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S")
         self.assertEqual(notes['Plan\ua789 "Q1".md'].split("\n---\n")[0], "\n".join([
             "---", 'title: "Plan: \\"Q1\\""', f"created: {local('20240115T093000Z')}",
-            f"updated: {local('20240116T101500Z')}", "tags:", '  - "Management-Excel"', '  - "work-stuff"',
-            '  - "ideas"', '  - "a-b"', 'source: "https://example.com/clip"', 'author: "Someone"',
-            'location: "45.1, 9.2"']))
+            f"updated: {local('20240116T101500Z')}", "tags:", "  - Management-Excel", "  - work-stuff",
+            "  - ideas", "  - a-b", "source: https://example.com/clip", "author: Someone",
+            "location: 45.1, 9.2"]))
+
+    def test_values_are_quoted_only_when_they_must_be(self):
+        for value, expected in [
+            ("LLMs Models - Theory", "LLMs Models - Theory"),
+            ('Ditelo con gli eventi (o "chiedetelo")',
+             'Ditelo con gli eventi (o "chiedetelo")'),
+            ("Develop-C#", "Develop-C#"), ("about:blank",
+                                           "about:blank"), (".Net Core", ".Net Core"),
+            ("-x", "-x"), ("[x] y", '"[x] y"'), ("Plan: Q1",
+                                                 '"Plan: Q1"'), ("Plan:", '"Plan:"'),
+            ("a # b", '"a # b"'), ("#a", '"#a"'), ("- a",
+                                                   '"- a"'), ("---", '"---"'), ("", '""'),
+            (" a", '" a"'), ("a ", '"a "'), ("*a",
+                                             '"*a"'), ("'a'", '"\'a\'"'), ('"a"', '"\\"a\\""'),
+            ("true", '"true"'), ("Null", '"Null"'), ("~",
+                                                     '"~"'), ("12", '"12"'), ("1.5", '"1.5"'),
+            ("0x1F", '"0x1F"'), ("1e3", '"1e3"'), (".inf",
+                                                   '".inf"'), (".NaN", '".NaN"'),
+            ("12 monkeys", "12 monkeys"), ("a\nb", '"a\\nb"'),
+        ]:
+            with self.subTest(value):
+                self.assertEqual(enex2md.yaml_string(value), expected)
 
     def test_missing_fields_are_left_out(self):
         notes = self.export(
             note_xml("Bare", "<div>x</div>", created=None, updated=None))
-        self.assertEqual(notes["Bare.md"], '---\ntitle: "Bare"\n---\nx\n')
+        self.assertEqual(notes["Bare.md"], "---\ntitle: Bare\n---\nx\n")
 
     def test_unreadable_fields_are_left_out(self):
         notes = self.export(note_xml("Odd", "<div>x</div>", created="2024-01-15", updated=" ",
                                      attributes={"author": " ", "latitude": "45.1"}))
-        self.assertEqual(notes["Odd.md"], '---\ntitle: "Odd"\n---\nx\n')
+        self.assertEqual(notes["Odd.md"], "---\ntitle: Odd\n---\nx\n")
 
     def test_tags(self):
         for tag, expected in [("Management - Excel", "Management-Excel"), ("work stuff", "work-stuff"),
@@ -480,6 +502,9 @@ class TestLinesAndBlankLines(ExportTest):
             ("lines holding only a link sit tight, as a list does",
              '<a href="http://a">a</a><div><a href="http://b">b</a></div><div><b><a href="http://c">c</a></b></div>'
              '<div>text</div>', "[a](http://a)\n[b](http://b)\n**[c](http://c)**\n\ntext"),
+            ("lines starting with a typed bullet sit tight, as a list does",
+             "<div>Kinds:</div><div>• a</div><div>• <b>b</b>: c</div><div>• d</div><div>text</div>",
+             "Kinds:\n\n• a\n• **b**: c\n• d\n\ntext"),
             ("a line break written as in HTML, with no slash",
              "<div>a<br>b</div>", "a\nb"),
         ])
